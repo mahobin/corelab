@@ -67,7 +67,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install tools
         run: |
@@ -130,7 +130,7 @@ jobs:
           cat bench-results/c/*.md 2>/dev/null || echo "No markdown results."
 
       - name: Upload C benchmark results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bench-c-${{ github.sha }}
           path: bench-results/c/
@@ -144,7 +144,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -153,7 +153,7 @@ jobs:
         run: cargo install hyperfine --locked || true
 
       - name: Cache Cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry/index/
@@ -193,7 +193,7 @@ jobs:
             done
 
       - name: Upload Rust benchmark results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bench-rust-${{ github.sha }}
           path: bench-results/rust/
@@ -207,15 +207,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       - name: Cache pip
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/pip
           key: python-bench-${{ runner.os }}-${{ hashFiles('**/requirements*.txt') }}
@@ -280,7 +280,7 @@ jobs:
             done
 
       - name: Upload Python benchmark results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bench-python-${{ github.sha }}
           path: bench-results/python/
@@ -297,7 +297,7 @@ jobs:
 
     steps:
       - name: Download all benchmark artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: bench-*-${{ github.sha }}
           path: all-results/
@@ -314,7 +314,7 @@ jobs:
             done
 
       - name: Upload combined results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bench-combined-${{ github.sha }}
           path: all-results/

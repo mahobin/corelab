@@ -57,12 +57,12 @@ jobs:
         # Rust is not supported by CodeQL yet; covered by cargo-audit + Miri.
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 2  # CodeQL benefits from seeing changed lines.
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4.35.3
         with:
           languages: ${{ matrix.language }}
           # Use the extended security query suite for deeper analysis.
@@ -92,7 +92,7 @@ jobs:
 
       # Python analysis is purely static; no build step needed.
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4.35.3
         with:
           category: "/language:${{ matrix.language }}"
           # Output SARIF for GitHub Security tab upload (automatic with this action).
@@ -109,7 +109,7 @@ jobs:
       security-events: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -142,7 +142,7 @@ jobs:
 
       - name: Upload cargo audit report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cargo-audit-report
           path: cargo-audit-report.txt
@@ -159,15 +159,15 @@ jobs:
       security-events: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       - name: Cache pip
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/pip
           key: pip-audit-${{ runner.os }}-${{ hashFiles('**/requirements*.txt', '**/pyproject.toml') }}
@@ -194,7 +194,7 @@ jobs:
 
       - name: Upload pip-audit report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pip-audit-report
           path: |
@@ -214,10 +214,10 @@ jobs:
       pull-requests: write  # Post a comment on the PR with findings.
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Dependency Review
-        uses: actions/dependency-review-action@v4
+        uses: actions/dependency-review-action@v4.9.0
         with:
           # Block PRs that introduce critically or highly vulnerable deps.
           fail-on-severity: high
@@ -237,10 +237,10 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -268,7 +268,7 @@ jobs:
 
       - name: Upload SBOMs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sbom-${{ github.sha }}
           path: sbom/

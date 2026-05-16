@@ -89,7 +89,7 @@ jobs:
             extra: "-fno-omit-frame-pointer"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Clang
         run: |
@@ -141,7 +141,7 @@ jobs:
 
       - name: Upload sanitizer logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: c-sanitizer-${{ matrix.sanitizer.name }}
           path: san-logs/${{ matrix.sanitizer.name }}/
@@ -159,7 +159,7 @@ jobs:
         sanitizer: [address, undefined, thread, leak]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install nightly toolchain
         uses: dtolnay/rust-toolchain@nightly
@@ -168,7 +168,7 @@ jobs:
           components: rust-src
 
       - name: Cache Cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry/index/
@@ -195,7 +195,7 @@ jobs:
 
       - name: Upload Rust sanitizer logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rust-sanitizer-${{ matrix.sanitizer }}
           path: rust-san-${{ matrix.sanitizer }}.txt
