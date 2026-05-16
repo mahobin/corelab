@@ -1,0 +1,14 @@
+# docker/python/.dockerignore
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.DS_Store
+**/Thumbs.db
+**/*.log
+**/tmp/
+**/temp/
+**/.venv/
+**/venv/
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
