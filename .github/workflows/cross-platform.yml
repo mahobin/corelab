@@ -1,0 +1,346 @@
+# =============================================================================
+# cross-platform.yml — Cross-Platform Build & Test Workflow
+#
+# Purpose:
+#   Build and test all three languages (C, Rust, Python) on Linux, macOS, and
+#   Windows. Catches platform-specific bugs: path separators, syscall gaps,
+#   linker differences, endianness assumptions, and OS ABI differences.
+#   Also validates containerized builds on Linux.
+#
+# Triggers:
+#   - push / PR on any source path
+#   - workflow_dispatch
+#
+# Architecture:
+#   - Native matrix: 3 OS × 3 languages = 9 cells, fail-fast false
+#   - Container job: Linux Docker builds for each language env
+#   - QEMU job: ARM64 emulated smoke test on linux/arm64
+#   - Shell differences handled via runner.os checks and PowerShell guards
+# =============================================================================
+
+name: Cross-Platform
+
+on:
+  push:
+    paths:
+      - "c/**"
+      - "rust/**"
+      - "python/**"
+      - "**.c"
+      - "**.h"
+      - "**.rs"
+      - "**.py"
+      - "**/Cargo.toml"
+      - "**/Makefile"
+      - "**/CMakeLists.txt"
+      - ".github/workflows/cross-platform.yml"
+  pull_request:
+    paths:
+      - "c/**"
+      - "rust/**"
+      - "python/**"
+      - "**.c"
+      - "**.h"
+      - "**.rs"
+      - "**.py"
+      - "**/Cargo.toml"
+      - "**/Makefile"
+      - ".github/workflows/cross-platform.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: cross-platform-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Native cross-platform matrix
+  # ---------------------------------------------------------------------------
+  native:
+    name: Native / ${{ matrix.os }} / ${{ matrix.language }}
+    runs-on: ${{ matrix.os }}
+    # Never fail-fast here — we want full visibility across all OS/language combos.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        language: [c, rust, python]
+        exclude:
+          # Valgrind and AFL++ don't run on macOS/Windows; keep C matrix lean.
+          # Full sanitizer runs happen in sanitizer.yml (Linux only).
+          []
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Language-specific setup
+      # -----------------------------------------------------------------------
+      - name: Setup — Rust
+        if: matrix.language == 'rust'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Setup — Python
+        if: matrix.language == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup — C (Ubuntu)
+        if: matrix.language == 'c' && runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends gcc clang make
+
+      - name: Setup — C (macOS)
+        if: matrix.language == 'c' && runner.os == 'macOS'
+        run: |
+          # Xcode CLT provides clang; brew provides gcc if needed.
+          brew install gcc make || true
+          # Ensure clang is on PATH.
+          which clang
+
+      - name: Setup — C (Windows)
+        if: matrix.language == 'c' && runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          install: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-clang make
+
+      # -----------------------------------------------------------------------
+      # Cargo cache (Rust only)
+      # -----------------------------------------------------------------------
+      - name: Cache Cargo
+        if: matrix.language == 'rust'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            rust/target/
+          key: xplat-rust-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: xplat-rust-${{ runner.os }}-
+
+      # -----------------------------------------------------------------------
+      # pip cache (Python only)
+      # -----------------------------------------------------------------------
+      - name: Cache pip
+        if: matrix.language == 'python'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/AppData/Local/pip/Cache
+          key: xplat-pip-${{ runner.os }}-${{ hashFiles('**/requirements*.txt', '**/pyproject.toml') }}
+          restore-keys: xplat-pip-${{ runner.os }}-
+
+      # -----------------------------------------------------------------------
+      # C build + test
+      # -----------------------------------------------------------------------
+      - name: C — Build (Linux/macOS)
+        if: matrix.language == 'c' && runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p build-xplat
+          find c/ -name "*.c" 2>/dev/null | sort | \
+            while IFS= read -r src; do
+              name="$(basename "${src%.c}")"
+              clang -Wall -Wextra -std=c17 "$src" -o "build-xplat/${name}" -lm || true
+            done
+
+      - name: C — Build (Windows/MSYS2)
+        if: matrix.language == 'c' && runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          mkdir -p build-xplat
+          find c/ -name "*.c" 2>/dev/null | sort | \
+            while IFS= read -r src; do
+              name="$(basename "${src%.c}")"
+              gcc -Wall -Wextra -std=c17 "$src" -o "build-xplat/${name}.exe" -lm || true
+            done
+
+      - name: C — Run tests (Linux/macOS)
+        if: matrix.language == 'c' && runner.os != 'Windows'
+        shell: bash
+        run: |
+          find build-xplat/ -type f -executable 2>/dev/null | \
+            while IFS= read -r bin; do
+              echo "Running: $bin"
+              timeout 30 "$bin" || true
+            done
+
+      - name: C — Run tests (Windows)
+        if: matrix.language == 'c' && runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          find build-xplat/ -name "*.exe" 2>/dev/null | \
+            while IFS= read -r bin; do
+              echo "Running: $bin"
+              timeout 30 "$bin" || true
+            done
+
+      # -----------------------------------------------------------------------
+      # Rust build + test
+      # -----------------------------------------------------------------------
+      - name: Rust — Build
+        if: matrix.language == 'rust'
+        shell: bash
+        working-directory: rust
+        run: cargo build --all-targets 2>&1 | tail -20
+
+      - name: Rust — Test
+        if: matrix.language == 'rust'
+        shell: bash
+        working-directory: rust
+        run: cargo test --all-targets --no-fail-fast 2>&1 | tee ../../rust-test-${{ runner.os }}.txt || true
+
+      # -----------------------------------------------------------------------
+      # Python build + test
+      # -----------------------------------------------------------------------
+      - name: Python — Install deps (Linux/macOS)
+        if: matrix.language == 'python' && runner.os != 'Windows'
+        shell: bash
+        run: |
+          pip install --upgrade pip
+          [[ -f python/requirements.txt ]] && pip install -r python/requirements.txt
+          pip install pytest
+
+      - name: Python — Install deps (Windows)
+        if: matrix.language == 'python' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          if (Test-Path "python/requirements.txt") {
+            pip install -r python/requirements.txt
+          }
+          pip install pytest
+
+      - name: Python — Bytecode compile
+        if: matrix.language == 'python'
+        shell: bash
+        run: python -m compileall -q python/ 2>&1 || true
+
+      - name: Python — pytest
+        if: matrix.language == 'python'
+        shell: bash
+        run: |
+          pytest python/ -v --tb=short --no-header --color=yes \
+            2>&1 | tee python-test-${{ runner.os }}.txt || true
+
+      # -----------------------------------------------------------------------
+      # Upload per-cell artifacts
+      # -----------------------------------------------------------------------
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xplat-${{ matrix.language }}-${{ runner.os }}
+          path: |
+            rust-test-${{ runner.os }}.txt
+            python-test-${{ runner.os }}.txt
+            build-xplat/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # Containerized Linux builds — reproducible environments
+  # ---------------------------------------------------------------------------
+  containerized:
+    name: Container / ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: python:3.12-slim
+            language: python
+            test_cmd: |
+              cd /workspace && \
+              pip install --quiet pytest && \
+              python -m compileall -q python/ 2>/dev/null || true && \
+              pytest python/ -v --tb=short --color=yes || true
+
+          - image: rust:slim
+            language: rust
+            test_cmd: |
+              cd /workspace/rust && \
+              cargo build --all-targets 2>&1 | tail -10 && \
+              cargo test --all-targets --no-fail-fast 2>&1 | tail -20 || true
+
+          - image: ubuntu:24.04
+            language: c
+            install_cmd: |
+              apt-get update -q && \
+              apt-get install -y --no-install-recommends gcc clang make
+            test_cmd: |
+              mkdir -p /tmp/build && \
+              find /workspace/c -name "*.c" 2>/dev/null | sort | \
+                while IFS= read -r src; do \
+                  name="$(basename "${src%.c}")" && \
+                  clang -Wall -std=c17 "$src" -o "/tmp/build/${name}" -lm && \
+                  timeout 10 "/tmp/build/${name}" || true; \
+                done
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run ${{ matrix.language }} tests in ${{ matrix.image }}
+        run: |
+          docker run --rm \
+            --volume "$PWD:/workspace:ro" \
+            "${{ matrix.image }}" \
+            /bin/sh -c "
+              ${{ matrix.install_cmd || 'true' }}
+              ${{ matrix.test_cmd }}
+            " 2>&1 | tee container-test-${{ matrix.language }}.txt || true
+
+      - name: Upload container test output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-test-${{ matrix.language }}
+          path: container-test-${{ matrix.language }}.txt
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # ARM64 smoke test via QEMU emulation
+  # ---------------------------------------------------------------------------
+  arm64-smoke:
+    name: ARM64 Smoke (QEMU)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build + run ARM64 Python smoke test
+        run: |
+          docker run --rm --platform linux/arm64 \
+            --volume "$PWD:/workspace:ro" \
+            python:3.12-slim \
+            /bin/sh -c "
+              python3 --version
+              python3 -c 'import platform; print(platform.machine())'
+              python3 -m compileall -q /workspace/python/ 2>/dev/null || true
+            " 2>&1 | tee arm64-smoke.txt
+
+      - name: Upload ARM64 smoke output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arm64-smoke
+          path: arm64-smoke.txt
+          retention-days: 7

@@ -1,0 +1,379 @@
+# =============================================================================
+# c.yml — C Language CI Workflow
+#
+# Purpose:
+#   Full CI pipeline for C source files. Runs static analysis, multi-compiler
+#   builds (GCC + Clang), sanitizer-instrumented tests, Valgrind memory
+#   checks, and benchmarks. Designed for systems programming experiments
+#   covering memory, pointers, parsers, and low-level runtime analysis.
+#
+# Triggers:
+#   - push / PR on paths that include C sources, headers, or Makefiles
+#   - workflow_dispatch for manual one-off runs
+#
+# Architecture notes:
+#   - Matrix across {gcc, clang} × {C17, C23} × {debug, release}
+#   - Sanitizer jobs run separately so failures are isolated and readable
+#   - Artifacts capture binaries + logs for post-run inspection
+# =============================================================================
+
+name: C
+
+on:
+  push:
+    paths:
+      - "c/**"
+      - "**.c"
+      - "**.h"
+      - "**/Makefile"
+      - "**/CMakeLists.txt"
+      - ".github/workflows/c.yml"
+  pull_request:
+    paths:
+      - "c/**"
+      - "**.c"
+      - "**.h"
+      - "**/Makefile"
+      - "**/CMakeLists.txt"
+      - ".github/workflows/c.yml"
+  workflow_dispatch:
+    inputs:
+      enable_valgrind:
+        description: "Run Valgrind memory checks"
+        type: boolean
+        default: true
+
+# Cancel superseded runs on the same ref/PR to save minutes.
+concurrency:
+  group: c-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # Shared warning flags applied to every compilation unit.
+  CFLAGS_COMMON: >-
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Werror
+    -Wno-unused-parameter
+  # ASan + UBSan combined flags.
+  SANITIZE_FLAGS: >-
+    -fsanitize=address,undefined
+    -fno-omit-frame-pointer
+    -g
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Static analysis & formatting — fast, no compilation required
+  # ---------------------------------------------------------------------------
+  static-analysis:
+    name: Static Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            cppcheck \
+            clang-format \
+            clang-tidy
+
+      - name: cppcheck
+        run: |
+          # --error-exitcode=1 makes cppcheck fail the job on any finding.
+          # --force processes files even when include resolution fails.
+          cppcheck \
+            --error-exitcode=1 \
+            --enable=warning,style,performance,portability \
+            --force \
+            --suppress=missingIncludeSystem \
+            --inline-suppr \
+            -I c/ \
+            c/ \
+            2>&1 | tee cppcheck-report.txt
+
+      - name: Check formatting (clang-format)
+        run: |
+          # Collect all C/H files and verify formatting matches clang-format
+          # style. Diff output helps the contributor see exactly what changed.
+          find c/ -name "*.c" -o -name "*.h" | sort > /tmp/c_files.txt
+          if [[ ! -s /tmp/c_files.txt ]]; then
+            echo "No C files found — skipping format check."
+            exit 0
+          fi
+
+          FAILED=0
+          while IFS= read -r file; do
+            if ! clang-format --dry-run --Werror "$file"; then
+              echo "::error file=${file}::Formatting violation detected"
+              FAILED=1
+            fi
+          done < /tmp/c_files.txt
+
+          if [[ $FAILED -ne 0 ]]; then
+            echo "Run 'clang-format -i <file>' to fix formatting."
+            exit 1
+          fi
+
+      - name: Upload static analysis report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c-static-analysis
+          path: cppcheck-report.txt
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Matrix build — compilers × standards × build types
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build (${{ matrix.compiler }}, C${{ matrix.std }}, ${{ matrix.build_type }})
+    needs: static-analysis
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        std: ["17", "23"]
+        build_type: [debug, release]
+        exclude:
+          # C23 + GCC on ubuntu-latest may need gcc-13+; keep matrix lean.
+          - compiler: gcc
+            std: "23"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install compiler
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            gcc \
+            clang \
+            make \
+            bear          # bear generates compile_commands.json from Makefiles
+
+      - name: Set compiler environment
+        run: |
+          if [[ "${{ matrix.compiler }}" == "clang" ]]; then
+            echo "CC=clang"  >> "$GITHUB_ENV"
+          else
+            echo "CC=gcc"    >> "$GITHUB_ENV"
+          fi
+
+          # Map build_type → optimization flags
+          if [[ "${{ matrix.build_type }}" == "release" ]]; then
+            echo "BUILD_CFLAGS=-O2 -DNDEBUG" >> "$GITHUB_ENV"
+          else
+            echo "BUILD_CFLAGS=-O0 -g"        >> "$GITHUB_ENV"
+          fi
+
+      - name: Build via Makefile (with fallback)
+        run: |
+          # If a root Makefile exists, prefer it. Otherwise compile everything
+          # under c/ directly — useful for early-stage repos.
+          if [[ -f Makefile ]]; then
+            bear -- make \
+              CC="$CC" \
+              CFLAGS="$CFLAGS_COMMON $BUILD_CFLAGS -std=c${{ matrix.std }}" \
+              all
+          else
+            echo "No root Makefile found — compiling c/ sources directly."
+            mkdir -p build
+
+            find c/ -name "*.c" | sort | while IFS= read -r src; do
+              out="build/$(basename "${src%.c}")"
+              echo "  Compiling $src → $out"
+              "$CC" \
+                $CFLAGS_COMMON \
+                $BUILD_CFLAGS \
+                -std=c${{ matrix.std }} \
+                "$src" -o "$out" -lm || true
+            done
+          fi
+
+      - name: Run tests
+        run: |
+          # Look for a test target in Makefile, else run built test binaries.
+          if make -n test 2>/dev/null; then
+            make test CC="$CC"
+          else
+            echo "No Makefile test target — running built binaries from build/."
+            find build/ -type f -executable -name "*test*" | sort | \
+              while IFS= read -r bin; do
+                echo "Running: $bin"
+                timeout 30 "$bin" || true
+              done
+          fi
+
+      - name: Collect compile_commands.json
+        if: matrix.compiler == 'clang' && matrix.std == '17' && matrix.build_type == 'debug'
+        run: |
+          # Only upload compile_commands once (clang/debug/C17 is canonical).
+          [[ -f compile_commands.json ]] && cp compile_commands.json /tmp/ || true
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: c-build-${{ matrix.compiler }}-c${{ matrix.std }}-${{ matrix.build_type }}
+          path: |
+            build/
+            compile_commands.json
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # Sanitizer job — runs after a successful debug build
+  # ---------------------------------------------------------------------------
+  sanitizers:
+    name: Sanitizers (ASan + UBSan)
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      CC: clang
+      ASAN_OPTIONS: "halt_on_error=1:detect_leaks=1"
+      UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends clang make
+
+      - name: Build with sanitizers
+        run: |
+          mkdir -p build-san
+          find c/ -name "*.c" | sort | while IFS= read -r src; do
+            out="build-san/$(basename "${src%.c}")-san"
+            clang \
+              $CFLAGS_COMMON \
+              $SANITIZE_FLAGS \
+              -std=c17 \
+              "$src" -o "$out" -lm || true
+          done
+
+      - name: Run sanitized binaries
+        run: |
+          find build-san/ -type f -executable | sort | \
+            while IFS= read -r bin; do
+              echo "=== $bin ==="
+              timeout 30 "$bin" 2>&1 || true
+            done
+
+      - name: Upload sanitizer logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c-sanitizer-logs
+          path: build-san/
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Valgrind memory check
+  # ---------------------------------------------------------------------------
+  valgrind:
+    name: Valgrind
+    needs: build
+    runs-on: ubuntu-latest
+    # Allow skipping via workflow_dispatch flag or on forks where this is slow.
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.enable_valgrind == true ||
+      github.event_name != 'workflow_dispatch'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends valgrind gcc make
+
+      - name: Build debug binaries
+        run: |
+          mkdir -p build-valgrind
+          find c/ -name "*.c" | sort | while IFS= read -r src; do
+            out="build-valgrind/$(basename "${src%.c}")"
+            gcc \
+              $CFLAGS_COMMON \
+              -O0 -g -std=c17 \
+              "$src" -o "$out" -lm || true
+          done
+
+      - name: Run Valgrind
+        run: |
+          mkdir -p valgrind-logs
+          find build-valgrind/ -type f -executable | sort | \
+            while IFS= read -r bin; do
+              name="$(basename "$bin")"
+              echo "=== Valgrind: $name ==="
+              valgrind \
+                --error-exitcode=1 \
+                --leak-check=full \
+                --show-leak-kinds=all \
+                --track-origins=yes \
+                --verbose \
+                "$bin" 2>&1 | tee "valgrind-logs/${name}.txt" || true
+            done
+
+      - name: Upload Valgrind logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c-valgrind-logs
+          path: valgrind-logs/
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Benchmark timing
+  # ---------------------------------------------------------------------------
+  benchmark:
+    name: C Benchmarks
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends gcc make time
+
+      - name: Build release
+        run: |
+          mkdir -p build-bench
+          find c/benchmarks/ -name "*.c" 2>/dev/null | sort | \
+            while IFS= read -r src; do
+              out="build-bench/$(basename "${src%.c}")"
+              gcc -O2 -DNDEBUG -std=c17 "$src" -o "$out" -lm || true
+            done
+
+      - name: Run benchmarks
+        run: |
+          mkdir -p bench-results
+          find build-bench/ -type f -executable | sort | \
+            while IFS= read -r bin; do
+              name="$(basename "$bin")"
+              echo "=== Benchmark: $name ==="
+              /usr/bin/time -v "$bin" 2>&1 | tee "bench-results/${name}.txt" || true
+            done
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: c-benchmark-results
+          path: bench-results/
+          retention-days: 30

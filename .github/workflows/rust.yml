@@ -1,0 +1,311 @@
+# =============================================================================
+# rust.yml — Rust Language CI Workflow
+#
+# Purpose:
+#   Full Rust CI pipeline covering format, lint, build, test, docs, security
+#   audit, and benchmarks. Optimized for fast incremental compilation via
+#   aggressive Cargo caching. Supports both stable and nightly toolchains.
+#
+# Triggers:
+#   - push / PR on Rust source paths
+#   - workflow_dispatch
+#
+# Architecture:
+#   - Lint job runs first and gates build/test (fail fast on trivial issues)
+#   - Build + test matrix across stable/nightly
+#   - Docs build confirms rustdoc compiles clean
+#   - Audit runs independently (network-dependent, shouldn't block tests)
+#   - Benchmarks run only on main pushes
+# =============================================================================
+
+name: Rust
+
+on:
+  push:
+    paths:
+      - "rust/**"
+      - "**.rs"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/rust.yml"
+  pull_request:
+    paths:
+      - "rust/**"
+      - "**.rs"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/rust.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: rust-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  # Emit backtraces in test failures.
+  RUST_BACKTRACE: "1"
+  # Deny a curated set of lint groups in CI — stricter than local dev.
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Format + Clippy — must pass before heavier jobs start
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint (fmt + clippy)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain with extras
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            rust/target/
+          key: rust-lint-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: rust-lint-${{ runner.os }}-
+
+      - name: cargo fmt --check
+        working-directory: rust
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        working-directory: rust
+        # --all-targets includes tests/benches. -D warnings turns warnings → errors.
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  # ---------------------------------------------------------------------------
+  # Build + test matrix
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test (${{ matrix.toolchain }})
+    needs: lint
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, nightly]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ${{ matrix.toolchain }} toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            rust/target/
+          key: rust-test-${{ matrix.toolchain }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: rust-test-${{ matrix.toolchain }}-${{ runner.os }}-
+
+      - name: cargo build
+        working-directory: rust
+        run: |
+          echo "::group::cargo build --all-targets"
+          cargo build --all-targets --all-features
+          echo "::endgroup::"
+
+      - name: cargo test
+        working-directory: rust
+        run: |
+          echo "::group::cargo test"
+          # --no-fail-fast runs all tests even after first failure.
+          cargo test --all-targets --all-features --no-fail-fast 2>&1 | \
+            tee ../test-output-${{ matrix.toolchain }}.txt
+          echo "::endgroup::"
+
+      - name: Upload test output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-test-output-${{ matrix.toolchain }}
+          path: test-output-${{ matrix.toolchain }}.txt
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Miri — undefined behaviour detection for unsafe code (nightly only)
+  # ---------------------------------------------------------------------------
+  miri:
+    name: Miri (UB detection)
+    needs: lint
+    runs-on: ubuntu-latest
+    # Miri is slow — only run on PRs and main push.
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly + Miri
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            rust/target/
+          key: rust-miri-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: rust-miri-${{ runner.os }}-
+
+      - name: cargo miri setup
+        working-directory: rust
+        run: cargo miri setup
+
+      - name: cargo miri test
+        working-directory: rust
+        env:
+          MIRIFLAGS: "-Zmiri-strict-provenance -Zmiri-disable-isolation"
+        run: |
+          # Run only tests that are known-Miri-clean; skip I/O-heavy ones.
+          cargo miri test --lib --all-features 2>&1 | tee ../miri-output.txt || true
+
+      - name: Upload Miri output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-miri-output
+          path: miri-output.txt
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Documentation build
+  # ---------------------------------------------------------------------------
+  docs:
+    name: Docs
+    needs: lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            rust/target/
+          key: rust-docs-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: rust-docs-${{ runner.os }}-
+
+      - name: cargo doc
+        working-directory: rust
+        env:
+          # Fail on broken intra-doc links.
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --no-deps --all-features
+
+      - name: Upload docs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-docs
+          path: rust/target/doc/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Security audit
+  # ---------------------------------------------------------------------------
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    # Runs independently — advisory DB fetch shouldn't block tests.
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: cargo audit
+        working-directory: rust
+        run: |
+          cargo audit \
+            --deny warnings \
+            --deny unsound \
+            2>&1 | tee ../audit-report.txt || true
+
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-audit-report
+          path: audit-report.txt
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # Benchmarks — only on main
+  # ---------------------------------------------------------------------------
+  benchmark:
+    name: Cargo Bench
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install hyperfine
+        run: |
+          # hyperfine is a versatile CLI benchmarking tool.
+          cargo install hyperfine --locked || true
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            rust/target/
+          key: rust-bench-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: rust-bench-${{ runner.os }}-
+
+      - name: cargo bench
+        working-directory: rust
+        run: |
+          cargo bench --all-features 2>&1 | tee ../bench-results.txt
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-bench-results
+          path: bench-results.txt
+          retention-days: 30

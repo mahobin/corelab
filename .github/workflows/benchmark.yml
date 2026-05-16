@@ -1,0 +1,321 @@
+# =============================================================================
+# benchmark.yml — Benchmark Workflow
+#
+# Purpose:
+#   Collect timing benchmarks for C, Rust, and Python targets. Uses hyperfine
+#   for wall-clock timing, cargo bench for Rust micro-benchmarks, and pyperf
+#   for statistically stable Python measurements. Results are uploaded as
+#   artifacts for trend tracking. Comparison between runs is possible by
+#   downloading artifacts from successive workflow runs.
+#
+# Triggers:
+#   - Manual dispatch (primary use case)
+#   - Scheduled weekly run (Sunday 03:00 UTC) for regression tracking
+#   - Push to main (lightweight timing run only)
+#
+# Architecture:
+#   - Three parallel benchmark jobs (C, Rust, Python)
+#   - hyperfine produces machine-readable JSON for all targets
+#   - Artifacts include both human-readable text and JSON for tooling
+#   - Optional comparison step downloads previous run artifact
+# =============================================================================
+
+name: Benchmark
+
+on:
+  schedule:
+    - cron: "0 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      warmup_runs:
+        description: "Warmup runs per benchmark"
+        type: number
+        default: 3
+      bench_runs:
+        description: "Measurement runs per benchmark"
+        type: number
+        default: 10
+  push:
+    branches: [main]
+    paths:
+      - "c/benchmarks/**"
+      - "rust/benches/**"
+      - "python/benchmarks/**"
+      - ".github/workflows/benchmark.yml"
+
+concurrency:
+  group: benchmark-${{ github.ref }}
+  cancel-in-progress: false  # Never cancel benchmark runs mid-flight.
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  WARMUP: ${{ inputs.warmup_runs || 3 }}
+  RUNS:   ${{ inputs.bench_runs  || 10 }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # C benchmarks — build release, measure with hyperfine
+  # ---------------------------------------------------------------------------
+  bench-c:
+    name: C Benchmarks
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends gcc clang make
+
+          # Install hyperfine from GitHub releases (apt version may be old).
+          HYPERFINE_VERSION="1.18.0"
+          wget -qO /tmp/hyperfine.tar.gz \
+            "https://github.com/sharkdp/hyperfine/releases/download/v${HYPERFINE_VERSION}/hyperfine-v${HYPERFINE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          tar -xzf /tmp/hyperfine.tar.gz -C /tmp
+          sudo install -m 755 "/tmp/hyperfine-v${HYPERFINE_VERSION}-x86_64-unknown-linux-musl/hyperfine" \
+            /usr/local/bin/hyperfine
+          hyperfine --version
+
+      - name: Build C benchmarks (release)
+        run: |
+          mkdir -p build-bench-c
+
+          if [[ -d c/benchmarks ]]; then
+            find c/benchmarks/ -name "*.c" | sort | \
+              while IFS= read -r src; do
+                name="$(basename "${src%.c}")"
+                echo "Building: $src"
+                gcc -O2 -DNDEBUG -march=native -std=c17 \
+                  "$src" -o "build-bench-c/${name}" -lm || true
+              done
+          else
+            echo "No c/benchmarks/ directory found — creating placeholder."
+            mkdir -p c/benchmarks
+            cat > c/benchmarks/fib.c << 'EOF'
+          #include <stdio.h>
+          static long fib(int n) { return n < 2 ? n : fib(n-1) + fib(n-2); }
+          int main(void) { printf("%ld\n", fib(35)); return 0; }
+          EOF
+            gcc -O2 -DNDEBUG -std=c17 c/benchmarks/fib.c -o build-bench-c/fib
+          fi
+
+      - name: Run hyperfine benchmarks
+        run: |
+          mkdir -p bench-results/c
+
+          find build-bench-c/ -type f -executable | sort | \
+            while IFS= read -r bin; do
+              name="$(basename "$bin")"
+              echo "=== Benchmarking: $name ==="
+
+              hyperfine \
+                --warmup   "$WARMUP" \
+                --runs     "$RUNS" \
+                --export-json "bench-results/c/${name}.json" \
+                --export-markdown "bench-results/c/${name}.md" \
+                "$bin" \
+                2>&1 | tee "bench-results/c/${name}.txt"
+            done
+
+      - name: Print benchmark summary
+        run: |
+          echo "=== C Benchmark Summary ==="
+          cat bench-results/c/*.md 2>/dev/null || echo "No markdown results."
+
+      - name: Upload C benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-c-${{ github.sha }}
+          path: bench-results/c/
+          retention-days: 90
+
+  # ---------------------------------------------------------------------------
+  # Rust benchmarks — cargo bench (Criterion)
+  # ---------------------------------------------------------------------------
+  bench-rust:
+    name: Rust Benchmarks
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install hyperfine
+        run: cargo install hyperfine --locked || true
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            rust/target/
+          key: rust-bench-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: rust-bench-${{ runner.os }}-
+
+      - name: cargo bench
+        working-directory: rust
+        run: |
+          mkdir -p ../bench-results/rust
+
+          # cargo bench exits 0 even if no bench targets exist.
+          # We capture output and report it regardless.
+          cargo bench --all-features \
+            2>&1 | tee ../bench-results/rust/cargo-bench.txt || true
+
+      - name: hyperfine over release binaries
+        working-directory: rust
+        run: |
+          # Build release first to get optimized binaries for hyperfine.
+          cargo build --release --all-features 2>&1 | tail -5
+
+          find target/release/ -maxdepth 1 -type f -executable | \
+            grep -v "\.d$" | sort | \
+            while IFS= read -r bin; do
+              name="$(basename "$bin")"
+              echo "=== hyperfine: $name ==="
+              hyperfine \
+                --warmup "$WARMUP" \
+                --runs   "$RUNS" \
+                --export-json "../bench-results/rust/${name}.json" \
+                "$bin" \
+                2>&1 | tee "../bench-results/rust/${name}.txt" || true
+            done
+
+      - name: Upload Rust benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-rust-${{ github.sha }}
+          path: bench-results/rust/
+          retention-days: 90
+
+  # ---------------------------------------------------------------------------
+  # Python benchmarks — pyperf
+  # ---------------------------------------------------------------------------
+  bench-python:
+    name: Python Benchmarks
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: python-bench-${{ runner.os }}-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: python-bench-${{ runner.os }}-
+
+      - name: Install deps + pyperf
+        run: |
+          pip install --upgrade pip pyperf
+          [[ -f python/requirements.txt ]] && pip install -r python/requirements.txt
+
+      - name: Install hyperfine
+        run: |
+          HYPERFINE_VERSION="1.18.0"
+          wget -qO /tmp/hyperfine.tar.gz \
+            "https://github.com/sharkdp/hyperfine/releases/download/v${HYPERFINE_VERSION}/hyperfine-v${HYPERFINE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          tar -xzf /tmp/hyperfine.tar.gz -C /tmp
+          sudo install -m 755 "/tmp/hyperfine-v${HYPERFINE_VERSION}-x86_64-unknown-linux-musl/hyperfine" \
+            /usr/local/bin/hyperfine
+
+      - name: Create placeholder benchmark if absent
+        run: |
+          mkdir -p python/benchmarks
+          if [[ ! -f python/benchmarks/bench_fib.py ]]; then
+            cat > python/benchmarks/bench_fib.py << 'EOF'
+          """Fibonacci benchmark using pyperf."""
+          import pyperf
+
+          def fib(n: int) -> int:
+              return n if n < 2 else fib(n - 1) + fib(n - 2)
+
+          runner = pyperf.Runner()
+          runner.bench_func("fib(30)", fib, 30)
+          EOF
+          fi
+
+      - name: Run pyperf benchmarks
+        run: |
+          mkdir -p bench-results/python
+
+          find python/benchmarks/ -name "bench_*.py" 2>/dev/null | sort | \
+            while IFS= read -r script; do
+              name="$(basename "${script%.py}")"
+              echo "=== pyperf: $name ==="
+
+              python "$script" \
+                --worker \
+                -o "bench-results/python/${name}.json" \
+                2>&1 | tee "bench-results/python/${name}.txt" || true
+            done
+
+      - name: hyperfine Python scripts
+        run: |
+          find python/benchmarks/ -name "bench_*.py" 2>/dev/null | sort | \
+            while IFS= read -r script; do
+              name="$(basename "${script%.py}")"
+              hyperfine \
+                --warmup "$WARMUP" \
+                --runs   "$RUNS" \
+                --export-json "bench-results/python/${name}-hyperfine.json" \
+                "python $script" \
+                2>&1 | tee "bench-results/python/${name}-hyperfine.txt" || true
+            done
+
+      - name: Upload Python benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-python-${{ github.sha }}
+          path: bench-results/python/
+          retention-days: 90
+
+  # ---------------------------------------------------------------------------
+  # Cross-language summary
+  # ---------------------------------------------------------------------------
+  summary:
+    name: Benchmark Summary
+    needs: [bench-c, bench-rust, bench-python]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Download all benchmark artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bench-*-${{ github.sha }}
+          path: all-results/
+
+      - name: Print combined summary
+        run: |
+          echo "# Benchmark Results — ${{ github.sha }}"
+          echo ""
+          find all-results/ -name "*.md" | sort | \
+            while IFS= read -r f; do
+              echo "## $f"
+              cat "$f"
+              echo ""
+            done
+
+      - name: Upload combined results
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-combined-${{ github.sha }}
+          path: all-results/
+          retention-days: 90

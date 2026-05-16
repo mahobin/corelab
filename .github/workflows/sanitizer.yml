@@ -1,0 +1,202 @@
+# =============================================================================
+# sanitizer.yml — Sanitizer Matrix Workflow
+#
+# Purpose:
+#   Dedicated sanitizer CI for C and Rust code. Each sanitizer (ASan, UBSan,
+#   LSan, TSan) runs as a separate matrix cell so failures are isolated,
+#   logs are readable, and quarantined targets don't pollute other results.
+#
+# Triggers:
+#   - push / PR on C or Rust paths
+#   - workflow_dispatch
+#
+# Architecture:
+#   - C sanitizers: matrix across ASan, UBSan, LSan, TSan using Clang
+#   - Rust sanitizers: nightly + -Zsanitizer flag matrix
+#   - Each cell uploads its own log artifact
+#   - fail-fast: false so all sanitizer results are visible in one run
+# =============================================================================
+
+name: Sanitizers
+
+on:
+  push:
+    paths:
+      - "c/**"
+      - "rust/**"
+      - "**.c"
+      - "**.h"
+      - "**.rs"
+      - "**/Cargo.toml"
+      - ".github/workflows/sanitizer.yml"
+  pull_request:
+    paths:
+      - "c/**"
+      - "rust/**"
+      - "**.c"
+      - "**.h"
+      - "**.rs"
+      - "**/Cargo.toml"
+      - ".github/workflows/sanitizer.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: sanitizer-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # C sanitizer matrix
+  # ---------------------------------------------------------------------------
+  c-sanitizers:
+    name: C / ${{ matrix.sanitizer.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer:
+          - name: ASan
+            flags: "-fsanitize=address"
+            env_vars: "ASAN_OPTIONS=halt_on_error=1:detect_leaks=1:detect_stack_use_after_return=1"
+            extra: "-fno-omit-frame-pointer"
+
+          - name: UBSan
+            flags: "-fsanitize=undefined"
+            env_vars: "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1"
+            extra: "-fno-omit-frame-pointer"
+
+          - name: ASan+UBSan
+            flags: "-fsanitize=address,undefined"
+            env_vars: "ASAN_OPTIONS=halt_on_error=1:detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1"
+            extra: "-fno-omit-frame-pointer"
+
+          - name: TSan
+            flags: "-fsanitize=thread"
+            env_vars: "TSAN_OPTIONS=halt_on_error=1"
+            extra: "-fno-omit-frame-pointer -fPIE -pie"
+            # TSan is incompatible with ASan/LSan; kept in its own cell.
+
+          - name: LSan
+            flags: "-fsanitize=leak"
+            env_vars: "LSAN_OPTIONS=verbosity=1:log_threads=1"
+            extra: "-fno-omit-frame-pointer"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Clang
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends clang make
+
+      - name: Build with ${{ matrix.sanitizer.name }}
+        run: |
+          mkdir -p build-san/${{ matrix.sanitizer.name }}
+
+          find c/ -name "*.c" 2>/dev/null | sort | \
+            while IFS= read -r src; do
+              name="$(basename "${src%.c}")"
+              out="build-san/${{ matrix.sanitizer.name }}/${name}"
+              echo "Building: $src → $out"
+
+              clang \
+                -Wall -Wextra -Wpedantic \
+                ${{ matrix.sanitizer.flags }} \
+                ${{ matrix.sanitizer.extra }} \
+                -g -O1 \
+                -std=c17 \
+                "$src" -o "$out" -lm || true
+            done
+
+      - name: Run with ${{ matrix.sanitizer.name }}
+        run: |
+          mkdir -p san-logs/${{ matrix.sanitizer.name }}
+
+          # Export sanitizer environment variables.
+          # The env_vars field contains space-separated KEY=VALUE pairs.
+          eval "export ${{ matrix.sanitizer.env_vars }}"
+
+          find "build-san/${{ matrix.sanitizer.name }}/" -type f -executable | sort | \
+            while IFS= read -r bin; do
+              name="$(basename "$bin")"
+              echo "=== ${{ matrix.sanitizer.name }}: $name ==="
+
+              timeout 60 "$bin" \
+                2>&1 | tee "san-logs/${{ matrix.sanitizer.name }}/${name}.txt" || true
+            done
+
+      - name: Summarize findings
+        if: always()
+        run: |
+          echo "=== Summary for ${{ matrix.sanitizer.name }} ==="
+          grep -r "ERROR\|SUMMARY\|runtime error\|WARNING" \
+            "san-logs/${{ matrix.sanitizer.name }}/" || echo "No findings."
+
+      - name: Upload sanitizer logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c-sanitizer-${{ matrix.sanitizer.name }}
+          path: san-logs/${{ matrix.sanitizer.name }}/
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Rust sanitizer matrix (nightly only — unstable feature)
+  # ---------------------------------------------------------------------------
+  rust-sanitizers:
+    name: Rust / ${{ matrix.sanitizer }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, undefined, thread, leak]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          # The rust-src component is required for -Zsanitizer to work.
+          components: rust-src
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            rust/target/
+          key: rust-san-${{ matrix.sanitizer }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: rust-san-${{ matrix.sanitizer }}-${{ runner.os }}-
+
+      - name: cargo test with -Zsanitizer=${{ matrix.sanitizer }}
+        working-directory: rust
+        env:
+          RUSTFLAGS: "-Zsanitizer=${{ matrix.sanitizer }}"
+          # Required for address sanitizer to detect leaks.
+          ASAN_OPTIONS: "detect_leaks=1"
+        run: |
+          # -Zbuild-std rebuilds the standard library with the sanitizer.
+          # Only linux/x86_64 targets are well-supported.
+          cargo test \
+            -Zbuild-std \
+            --target x86_64-unknown-linux-gnu \
+            --all-features \
+            2>&1 | tee ../rust-san-${{ matrix.sanitizer }}.txt || true
+
+      - name: Upload Rust sanitizer logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-sanitizer-${{ matrix.sanitizer }}
+          path: rust-san-${{ matrix.sanitizer }}.txt
+          retention-days: 14

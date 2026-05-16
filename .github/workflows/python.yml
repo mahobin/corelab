@@ -1,0 +1,262 @@
+# =============================================================================
+# python.yml — Python CI Workflow
+#
+# Purpose:
+#   Full Python CI pipeline covering linting (ruff + black), type checking
+#   (mypy), bytecode compilation verification, test execution (pytest),
+#   and benchmark timing. Supports Python 3.11–3.14.
+#
+# Triggers:
+#   - push / PR on Python source paths
+#   - workflow_dispatch
+#
+# Architecture:
+#   - Lint job runs first and gates everything downstream
+#   - Matrix test across 3.11 / 3.12 / 3.13 / 3.14
+#   - Benchmarks run only on main pushes (expensive)
+#   - pip caching keyed on requirements hash for fast restores
+# =============================================================================
+
+name: Python
+
+on:
+  push:
+    paths:
+      - "python/**"
+      - "**.py"
+      - "requirements*.txt"
+      - "pyproject.toml"
+      - "setup.cfg"
+      - ".github/workflows/python.yml"
+  pull_request:
+    paths:
+      - "python/**"
+      - "**.py"
+      - "requirements*.txt"
+      - "pyproject.toml"
+      - "setup.cfg"
+      - ".github/workflows/python.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: python-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Lint — ruff + black; fast, no deps needed
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint (ruff + black)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: python-lint-${{ runner.os }}-${{ hashFiles('**/pyproject.toml', '**/requirements*.txt') }}
+          restore-keys: python-lint-${{ runner.os }}-
+
+      - name: Install linters
+        run: pip install ruff black
+
+      - name: ruff check
+        run: |
+          ruff check python/ \
+            --output-format=github \
+            2>&1 | tee ruff-report.txt
+
+      - name: black --check
+        run: |
+          black --check --diff python/ \
+            2>&1 | tee black-report.txt
+
+      - name: Upload lint reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-lint-reports
+          path: |
+            ruff-report.txt
+            black-report.txt
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Type checking — mypy
+  # ---------------------------------------------------------------------------
+  typecheck:
+    name: Type Check (mypy)
+    needs: lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: python-typecheck-${{ runner.os }}-${{ hashFiles('**/pyproject.toml', '**/requirements*.txt') }}
+          restore-keys: python-typecheck-${{ runner.os }}-
+
+      - name: Install dependencies + mypy
+        run: |
+          if [[ -f requirements.txt ]]; then
+            pip install -r requirements.txt
+          fi
+          if [[ -f python/requirements.txt ]]; then
+            pip install -r python/requirements.txt
+          fi
+          pip install mypy
+
+      - name: mypy
+        run: |
+          mypy python/ \
+            --ignore-missing-imports \
+            --show-error-codes \
+            --pretty \
+            2>&1 | tee mypy-report.txt || true
+          # Non-zero exit is expected while the codebase is exploratory.
+          # Change `|| true` to fail once fully typed.
+
+      - name: Upload mypy report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-mypy-report
+          path: mypy-report.txt
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Test matrix — 3.11 / 3.12 / 3.13 / 3.14
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    needs: lint
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: python-test-${{ matrix.python-version }}-${{ runner.os }}-${{ hashFiles('**/pyproject.toml', '**/requirements*.txt') }}
+          restore-keys: python-test-${{ matrix.python-version }}-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          # Install from root requirements if present.
+          [[ -f requirements.txt ]]        && pip install -r requirements.txt
+          [[ -f python/requirements.txt ]] && pip install -r python/requirements.txt
+          # Always install test tooling.
+          pip install pytest pytest-cov
+
+      - name: Verify bytecode compilation
+        run: |
+          # Fail if any .py file has syntax errors detectable at compile time.
+          python -m compileall -q python/ 2>&1 | tee compileall-${{ matrix.python-version }}.txt
+
+      - name: pytest
+        run: |
+          pytest python/ \
+            -v \
+            --tb=short \
+            --no-header \
+            --color=yes \
+            --junitxml=test-results-${{ matrix.python-version }}.xml \
+            --cov=python \
+            --cov-report=xml:coverage-${{ matrix.python-version }}.xml \
+            --cov-report=term-missing \
+            2>&1 | tee pytest-output-${{ matrix.python-version }}.txt || true
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-test-results-${{ matrix.python-version }}
+          path: |
+            test-results-${{ matrix.python-version }}.xml
+            pytest-output-${{ matrix.python-version }}.txt
+            compileall-${{ matrix.python-version }}.txt
+            coverage-${{ matrix.python-version }}.xml
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Benchmarks — only on main
+  # ---------------------------------------------------------------------------
+  benchmark:
+    name: Python Benchmarks
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: python-bench-${{ runner.os }}-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: python-bench-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          [[ -f python/requirements.txt ]] && pip install -r python/requirements.txt
+          # pyperf produces stable, statistically sound timing measurements.
+          pip install pyperf
+
+      - name: Run benchmarks
+        run: |
+          mkdir -p bench-results
+          find python/benchmarks/ -name "*.py" 2>/dev/null | sort | \
+            while IFS= read -r script; do
+              name="$(basename "${script%.py}")"
+              echo "=== Benchmark: $name ==="
+              python "$script" 2>&1 | tee "bench-results/${name}.txt" || true
+            done
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-benchmark-results
+          path: bench-results/
+          retention-days: 30

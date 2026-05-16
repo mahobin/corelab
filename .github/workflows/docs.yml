@@ -1,0 +1,229 @@
+# =============================================================================
+# docs.yml — Documentation CI/CD Workflow
+#
+# Purpose:
+#   Build and validate documentation using MkDocs Material. Checks Markdown
+#   files for broken links and formatting issues. Deploys to GitHub Pages on
+#   pushes to main. Strict mode ensures docs never silently degrade.
+#
+# Triggers:
+#   - push / PR on docs/** and *.md paths
+#   - workflow_dispatch
+#
+# Architecture:
+#   - Validation (markdown-link-check + markdownlint) runs first
+#   - MkDocs strict build validates site generation
+#   - GitHub Pages deployment only on main push
+# =============================================================================
+
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "**.md"
+      - "mkdocs.yml"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "**.md"
+      - "mkdocs.yml"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Markdown validation — links + lint
+  # ---------------------------------------------------------------------------
+  validate:
+    name: Validate Markdown
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history needed for accurate blame/link resolution in some cases.
+          fetch-depth: 0
+
+      - name: Set up Node.js for markdown-link-check
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install markdown tools
+        run: |
+          npm install -g \
+            markdown-link-check \
+            markdownlint-cli
+
+      - name: markdownlint
+        run: |
+          # Lint all Markdown files. .markdownlint.yml at repo root configures
+          # rules; fall back to defaults if not present.
+          find . -name "*.md" \
+            -not -path "./.git/*" \
+            -not -path "./node_modules/*" \
+            | sort \
+            | xargs markdownlint \
+            2>&1 | tee markdownlint-report.txt || true
+
+      - name: markdown-link-check
+        run: |
+          # Check for broken links in all Markdown files.
+          # --quiet suppresses successful link output.
+          # --config controls timeout/retry settings.
+          FAILED=0
+          find . -name "*.md" \
+            -not -path "./.git/*" \
+            -not -path "./node_modules/*" \
+            | sort \
+            | while IFS= read -r file; do
+              echo "Checking links in: $file"
+              markdown-link-check \
+                --quiet \
+                "$file" \
+                2>&1 | tee -a link-check-report.txt || FAILED=1
+            done
+
+          # Surface failures without stopping the loop above.
+          if grep -q "ERROR" link-check-report.txt 2>/dev/null; then
+            echo "::warning::Broken links detected — see link-check-report.txt"
+          fi
+
+      - name: Upload validation reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-validation-reports
+          path: |
+            markdownlint-report.txt
+            link-check-report.txt
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # MkDocs build (strict mode)
+  # ---------------------------------------------------------------------------
+  build:
+    name: MkDocs Build
+    needs: validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: docs-pip-${{ runner.os }}-${{ hashFiles('**/requirements*.txt', 'mkdocs.yml') }}
+          restore-keys: docs-pip-${{ runner.os }}-
+
+      - name: Install MkDocs + plugins
+        run: |
+          pip install --upgrade pip
+          pip install \
+            mkdocs \
+            mkdocs-material \
+            mkdocs-minify-plugin \
+            mkdocs-git-revision-date-localized-plugin \
+            pymdown-extensions
+
+          # Install any docs-specific requirements if they exist.
+          [[ -f docs/requirements.txt ]] && pip install -r docs/requirements.txt
+
+      - name: Create minimal mkdocs.yml if absent
+        run: |
+          # Allow the workflow to succeed on a fresh repo that has no
+          # mkdocs.yml yet, so docs infrastructure can be bootstrapped.
+          if [[ ! -f mkdocs.yml ]]; then
+            echo "No mkdocs.yml found — generating minimal config for validation."
+            cat > mkdocs.yml << 'EOF'
+          site_name: Engineering Learning Repository
+          docs_dir: docs
+          theme:
+            name: material
+          EOF
+            mkdir -p docs
+            [[ ! -f docs/index.md ]] && echo "# Index" > docs/index.md
+          fi
+
+      - name: MkDocs build (strict)
+        run: |
+          # --strict turns warnings (e.g. broken nav, unresolved ref) → errors.
+          mkdocs build --strict --verbose 2>&1 | tee mkdocs-build.log
+
+      - name: Upload built site
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-site
+          path: site/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # GitHub Pages deployment — main branch only
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write  # Required for gh-pages branch push
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: docs-deploy-pip-${{ runner.os }}-${{ hashFiles('**/requirements*.txt', 'mkdocs.yml') }}
+          restore-keys: docs-deploy-pip-${{ runner.os }}-
+
+      - name: Install MkDocs + plugins
+        run: |
+          pip install --upgrade pip
+          pip install \
+            mkdocs \
+            mkdocs-material \
+            mkdocs-minify-plugin \
+            mkdocs-git-revision-date-localized-plugin \
+            pymdown-extensions
+
+      - name: Configure git for deploy
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Deploy
+        run: |
+          # mkdocs gh-deploy pushes the built site to the gh-pages branch.
+          mkdocs gh-deploy --force --clean --verbose
