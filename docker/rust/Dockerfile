@@ -20,7 +20,10 @@
 #   docker build --target ci  -t rust-env:ci  .
 # =============================================================================
 
-ARG RUST_STABLE_VERSION=1
+# "stable" is the correct rustup channel name. Do not use bare version numbers
+# like "1" — rustup rejects them. Use "stable", "beta", "nightly", or a fully
+# qualified version like "1.78.0".
+ARG RUST_STABLE_VERSION=stable
 ARG DEBIAN_VERSION=bookworm-slim
 
 # =============================================================================
@@ -51,10 +54,11 @@ RUN apt-get update -q && \
         git \
         make \
         cmake \
-        # For cargo-flamegraph
-        linux-perf \
+        # perf: available as `linux-perf` on Debian bookworm.
+        # Silently skip if unavailable (e.g. arm64 kernel mismatch in QEMU builds).
         # For cargo-valgrind
         valgrind \
+    && apt-get install -y --no-install-recommends linux-perf 2>/dev/null || true \
     && rm -rf /var/lib/apt/lists/*
 
 # =============================================================================

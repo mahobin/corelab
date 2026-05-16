@@ -105,11 +105,11 @@ RUN apt-get update -q && \
         # Debugging
         gdb \
         lldb-${LLVM_VERSION} \
-        # Performance
-        linux-tools-generic \
-        # Shared libraries needed at runtime
+        # C standard library headers (provides math.h, string.h, etc.)
+        # Note: libm-dev does not exist on Ubuntu 24.04; math is part of libc6-dev.
+        # linux-tools-generic is intentionally omitted: perf requires a privileged
+        # container with matching kernel headers; use the host's `perf` instead.
         libc6-dev \
-        libm-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Create unversioned symlinks so `clang`, `clang-format`, `clang-tidy`

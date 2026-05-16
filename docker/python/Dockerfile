@@ -217,13 +217,14 @@ CMD ["bash"]
 # =============================================================================
 FROM base AS fuzz
 
-# Atheris requires Clang and libFuzzer; install them here rather than in
-# the base image to keep non-fuzz images lean.
+# Atheris requires Clang and LLVM at install time so it can link against
+# libFuzzer. There is NO separate libfuzzer-dev package on Debian/Ubuntu —
+# libFuzzer is part of the Clang/LLVM installation itself and is accessed
+# via `-fsanitize=fuzzer`. Installing clang + llvm is sufficient.
 RUN apt-get update -q && \
     apt-get install -y --no-install-recommends \
         clang \
         llvm \
-        libfuzzer-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Atheris and its Python-level dependencies.
