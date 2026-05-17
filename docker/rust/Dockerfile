@@ -44,7 +44,7 @@ ENV LANG=C.UTF-8 \
 
 RUN dnf install -y epel-release dnf-plugins-core && \
     dnf config-manager --set-enabled crb && \
-    dnf install -y \
+    dnf install -y --allowerasing \
         # Build essentials (linker, assembler, basic headers)
         gcc \
         gcc-c++ \

@@ -43,19 +43,25 @@ ENV LANG=C.UTF-8 \
 # Builder). EPEL provides AFL++, cppcheck, bear. CRB unlocks -devel packages.
 RUN dnf install -y epel-release dnf-plugins-core && \
     dnf config-manager --set-enabled crb && \
-    dnf install -y \
+    dnf install -y --allowerasing \
+        gcc \
+        gcc-c++ \
         make \
-        cmake \
-        ninja-build \
         pkg-config \
+        openssl-devel \
+        ninja-build \
+        lld \
+        clang \
         ca-certificates \
         curl \
         wget \
         git \
-        xz \
-        zstd \
+        cmake \
         python3 \
         python3-pip \
+        valgrind \
+        xz \
+        zstd \
     && dnf clean all
 
 # =============================================================================

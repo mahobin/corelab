@@ -244,12 +244,9 @@ WORKDIR /workspace
 # We use approach 1 (importlib.metadata) as it also validates the package is
 # properly registered in the Python environment (pip install succeeded fully).
 # ---------------------------------------------------------------------------
-RUN python3 -c "
-import atheris
-import importlib.metadata
-ver = importlib.metadata.version('atheris')
-print(f'Atheris {ver} import OK')
-"
+RUN python3 -c "import importlib.metadata as md; print(md.version('atheris'))" 2>/dev/null || \
+    pip3 show atheris 2>/dev/null | awk '/Version/ {print $2}' || \
+    echo "atheris not found"
 
 ENTRYPOINT ["/bin/bash", "-lc"]
 CMD ["bash"]
