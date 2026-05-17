@@ -188,7 +188,7 @@ RUN cargo-binstall --no-confirm cargo-fuzz
 RUN cargo search serde --limit 1 > /dev/null 2>&1 || true
 
 # Verify all tools are present.
-RUN cargo-binstall --version && \
+RUN cargo-binstall -V && \
     cargo audit --version && \
     cargo watch --version && \
     cargo fuzz --version && \
