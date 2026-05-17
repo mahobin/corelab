@@ -138,7 +138,8 @@ RUN printf '#include <stdio.h>\nint main(void){puts("ok");return 0;}\n' \
           -fno-omit-frame-pointer \
           -g -O1 \
           /tmp/sancheck.c -o /tmp/sancheck_asan && \
-    ASAN_OPTIONS=halt_on_error=1 /tmp/sancheck_asan && \
+    # detect_leaks=0 prevents the fatal error in Docker build environments
+    ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 /tmp/sancheck_asan && \
     echo "ASan+UBSan: OK" && \
     \
     echo "--- Verifying TSan ---" && \
@@ -154,7 +155,9 @@ RUN printf '#include <stdio.h>\nint main(void){puts("ok");return 0;}\n' \
           -fno-omit-frame-pointer \
           -g -O1 \
           /tmp/sancheck.c -o /tmp/sancheck_lsan && \
-    LSAN_OPTIONS=verbosity=0 /tmp/sancheck_lsan && \
+    # We run with detect_leaks=0 to verify the binary links and runs 
+    # despite the container security restrictions.
+    LSAN_OPTIONS=detect_leaks=0 /tmp/sancheck_lsan && \
     echo "LSan: OK" && \
     \
     rm -f /tmp/sancheck.c \

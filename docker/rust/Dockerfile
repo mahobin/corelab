@@ -181,7 +181,7 @@ RUN cargo-binstall --no-confirm hyperfine
 # Step 3: cargo-fuzz has no stable prebuilt — it must compile from source
 # because it uses nightly-only Cargo features. Isolated in its own layer.
 # This is the one acceptable slow step; it compiles ~30 crates, ~4 minutes.
-RUN cargo +nightly install cargo-fuzz --locked
+RUN cargo-binstall --no-confirm cargo-fuzz
 
 # Warm the Cargo registry index so the first `cargo build` in a container
 # doesn't incur a cold registry fetch.
