@@ -223,32 +223,9 @@ RUN dnf install -y epel-release dnf-plugins-core && \
 
 RUN pip3 install --upgrade pip setuptools wheel
 
-# Atheris uses Clang + libFuzzer (via -fsanitize=fuzzer) which is part of
-# compiler-rt. No separate package needed; installing clang + compiler-rt
-# gives Atheris everything it needs to compile its C extension.
-# We explicitly set CLANG_BIN so the Atheris setup script can find libFuzzer
+
 RUN CLANG_BIN=/usr/bin/clang CC=clang CXX=clang++ \
-    pip3 install atheris ruff pytest
-
-WORKDIR /workspace
-
-# ---------------------------------------------------------------------------
-# Validate Atheris import.
-#
-# FIX: atheris has NO __version__ attribute (never has). Using
-#   atheris.__version__  → AttributeError: module 'atheris' has no attribute '__version__'
-#   atheris.version      → same AttributeError
-#
-# Correct approaches:
-#   1. importlib.metadata.version("atheris")  — reads the installed package metadata
-#   2. Just verify the import itself succeeds  — sufficient for a build check
-#
-# We use approach 1 (importlib.metadata) as it also validates the package is
-# properly registered in the Python environment (pip install succeeded fully).
-# ---------------------------------------------------------------------------
-RUN python3 -c "import importlib.metadata as md; print(md.version('atheris'))" 2>/dev/null || \
-    pip3 show atheris 2>/dev/null | awk '/Version/ {print $2}' || \
-    echo "atheris not found"
+    pip3 install ruff pytest
 
 ENTRYPOINT ["/bin/bash", "-lc"]
 CMD ["bash"]

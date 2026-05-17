@@ -101,7 +101,6 @@ RUN dnf install -y \
 RUN dnf install -y --allowerasing \
         cppcheck \
         valgrind \
-        aflplusplus \
         bear \
         strace \
         ltrace \
