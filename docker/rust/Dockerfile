@@ -141,7 +141,7 @@ FROM nightly AS tools
 # ---------------------------------------------------------------------------
 
 # Step 1: Install cargo-binstall itself (it has a prebuilt musl binary).
-ARG CARGO_BINSTALL_VERSION=1.10.4
+ARG CARGO_BINSTALL_VERSION=1.19.1
 RUN ARCH="$(uname -m)" && \
     case "$ARCH" in \
         x86_64)  TRIPLE="x86_64-unknown-linux-musl" ;; \
@@ -152,7 +152,7 @@ RUN ARCH="$(uname -m)" && \
         "https://github.com/cargo-bins/cargo-binstall/releases/download/v${CARGO_BINSTALL_VERSION}/cargo-binstall-${TRIPLE}.tgz" \
         | tar -xz -C /usr/local/bin && \
     chmod +x /usr/local/bin/cargo-binstall && \
-    cargo-binstall --version
+    cargo-binstall -V
 
 # Step 2: Install all tools via binstall (prebuilt binaries, no compilation).
 # Each tool is a separate RUN so Docker caches each independently.

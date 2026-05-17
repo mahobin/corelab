@@ -143,7 +143,7 @@ RUN apt-get update -q && \
     && rm -rf /var/lib/apt/lists/*
 
 # Install hyperfine via cargo-binstall (arch-aware, no URL construction).
-ARG CARGO_BINSTALL_VERSION=1.10.4
+ARG CARGO_BINSTALL_VERSION=1.19.1
 RUN ARCH="$(uname -m)" && \
     case "$ARCH" in \
         x86_64)  TRIPLE="x86_64-unknown-linux-musl" ;; \
@@ -226,7 +226,9 @@ RUN pip3 install --upgrade pip setuptools wheel
 # Atheris uses Clang + libFuzzer (via -fsanitize=fuzzer) which is part of
 # compiler-rt. No separate package needed; installing clang + compiler-rt
 # gives Atheris everything it needs to compile its C extension.
-RUN pip3 install atheris ruff pytest
+# We explicitly set CLANG_BIN so the Atheris setup script can find libFuzzer
+RUN CLANG_BIN=/usr/bin/clang CC=clang CXX=clang++ \
+    pip3 install atheris ruff pytest
 
 WORKDIR /workspace
 

@@ -98,10 +98,10 @@ RUN dnf install -y \
     && dnf clean all
 
 # Analysis, debugging, and fuzzing tools from EPEL.
-RUN dnf install -y \
+RUN dnf install -y --allowerasing \
         cppcheck \
         valgrind \
-        afl++ \
+        aflplusplus \
         bear \
         strace \
         ltrace \
