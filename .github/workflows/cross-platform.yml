@@ -2,20 +2,26 @@
 # cross-platform.yml — Cross-Platform Build & Test Workflow
 #
 # Purpose:
-#   Build and test all three languages (C, Rust, Python) on Linux, macOS, and
-#   Windows. Catches platform-specific bugs: path separators, syscall gaps,
-#   linker differences, endianness assumptions, and OS ABI differences.
-#   Also validates containerized builds on Linux.
+#   Build and test C, Rust, and Python on Linux, macOS, and Windows.
+#   Catches platform-specific bugs: path separators, syscall gaps, linker
+#   differences, endianness assumptions, and OS ABI differences.
+#   Also validates containerised builds and ARM64 via QEMU.
 #
 # Triggers:
 #   - push / PR on any source path
 #   - workflow_dispatch
 #
 # Architecture:
-#   - Native matrix: 3 OS × 3 languages = 9 cells, fail-fast false
+#   - Native matrix: 3 OS × 3 languages = 9 cells, fail-fast: false
 #   - Container job: Linux Docker builds for each language env
-#   - QEMU job: ARM64 emulated smoke test on linux/arm64
-#   - Shell differences handled via runner.os checks and PowerShell guards
+#   - QEMU job: ARM64 emulated smoke test
+#
+# Key fix applied throughout this file:
+#   `find <dir>/` exits 1 when <dir> does not exist, even with 2>/dev/null.
+#   The error suppression only redirects stderr; the exit code still propagates
+#   through the pipeline and fails the step. All find invocations now guard
+#   with `[ -d <dir> ]` before running, so the step is a no-op (exit 0) on a
+#   fresh repository where language subdirectories haven't been created yet.
 # =============================================================================
 
 name: Cross-Platform
@@ -62,22 +68,17 @@ jobs:
   native:
     name: Native / ${{ matrix.os }} / ${{ matrix.language }}
     runs-on: ${{ matrix.os }}
-    # Never fail-fast here — we want full visibility across all OS/language combos.
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         language: [c, rust, python]
-        exclude:
-          # Valgrind and AFL++ don't run on macOS/Windows; keep C matrix lean.
-          # Full sanitizer runs happen in sanitizer.yml (Linux only).
-          []
 
     steps:
       - uses: actions/checkout@v6
 
       # -----------------------------------------------------------------------
-      # Language-specific setup
+      # Language-specific toolchain setup
       # -----------------------------------------------------------------------
       - name: Setup — Rust
         if: matrix.language == 'rust'
@@ -91,7 +92,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Setup — C (Ubuntu)
+      - name: Setup — C (Linux)
         if: matrix.language == 'c' && runner.os == 'Linux'
         run: |
           sudo apt-get update -q
@@ -100,10 +101,12 @@ jobs:
       - name: Setup — C (macOS)
         if: matrix.language == 'c' && runner.os == 'macOS'
         run: |
-          # Xcode CLT provides clang; brew provides gcc if needed.
+          # Xcode CLT (always present on GitHub macOS runners) provides
+          # /usr/bin/clang. Homebrew gcc/make are optional extras.
+          # brew install can fail on pre-installed packages; || true is correct.
           brew install gcc make || true
-          # Ensure clang is on PATH.
-          which clang
+          # Confirm clang is reachable before proceeding.
+          clang --version
 
       - name: Setup — C (Windows)
         if: matrix.language == 'c' && runner.os == 'Windows'
@@ -137,78 +140,131 @@ jobs:
           path: |
             ~/.cache/pip
             ~/AppData/Local/pip/Cache
-          key: xplat-pip-${{ runner.os }}-${{ hashFiles('**/requirements*.txt', '**/pyproject.toml') }}
+          key: xplat-pip-${{ runner.os }}-${{ hashFiles('**/requirements*.txt') }}
           restore-keys: xplat-pip-${{ runner.os }}-
 
       # -----------------------------------------------------------------------
-      # C build + test
+      # C — build (Linux / macOS)
       # -----------------------------------------------------------------------
       - name: C — Build (Linux/macOS)
         if: matrix.language == 'c' && runner.os != 'Windows'
         shell: bash
         run: |
+          # Guard: if c/ doesn't exist yet the step is a clean no-op (exit 0).
+          # `find c/` exits 1 when the directory is absent even with 2>/dev/null
+          # because only stderr is suppressed — the non-zero exit still fails
+          # the pipeline. The explicit directory check fixes this permanently.
+          if [ ! -d c ]; then
+            echo "c/ directory not found — nothing to build yet."
+            exit 0
+          fi
+
           mkdir -p build-xplat
-          find c/ -name "*.c" 2>/dev/null | sort | \
+
+          find c/ -name "*.c" | sort | \
             while IFS= read -r src; do
               name="$(basename "${src%.c}")"
+              echo "Compiling: $src"
               clang -Wall -Wextra -std=c17 "$src" -o "build-xplat/${name}" -lm || true
             done
 
+          echo "Build complete. Binaries:"
+          ls -la build-xplat/ 2>/dev/null || echo "  (none produced)"
+
+      # -----------------------------------------------------------------------
+      # C — build (Windows / MSYS2)
+      # -----------------------------------------------------------------------
       - name: C — Build (Windows/MSYS2)
         if: matrix.language == 'c' && runner.os == 'Windows'
         shell: msys2 {0}
         run: |
+          if [ ! -d c ]; then
+            echo "c/ directory not found — nothing to build yet."
+            exit 0
+          fi
+
           mkdir -p build-xplat
-          find c/ -name "*.c" 2>/dev/null | sort | \
+
+          find c/ -name "*.c" | sort | \
             while IFS= read -r src; do
               name="$(basename "${src%.c}")"
+              echo "Compiling: $src"
               gcc -Wall -Wextra -std=c17 "$src" -o "build-xplat/${name}.exe" -lm || true
             done
 
+      # -----------------------------------------------------------------------
+      # C — run (Linux / macOS)
+      # -----------------------------------------------------------------------
       - name: C — Run tests (Linux/macOS)
         if: matrix.language == 'c' && runner.os != 'Windows'
         shell: bash
         run: |
-          find build-xplat/ -type f -executable 2>/dev/null | \
+          # Guard: build-xplat/ may not exist if the build step produced
+          # nothing (empty c/ directory or all compilations failed with ||true).
+          if [ ! -d build-xplat ] || [ -z "$(ls -A build-xplat 2>/dev/null)" ]; then
+            echo "No built binaries found — skipping run step."
+            exit 0
+          fi
+
+          find build-xplat/ -type f -executable | sort | \
             while IFS= read -r bin; do
               echo "Running: $bin"
               timeout 30 "$bin" || true
             done
 
+      # -----------------------------------------------------------------------
+      # C — run (Windows)
+      # -----------------------------------------------------------------------
       - name: C — Run tests (Windows)
         if: matrix.language == 'c' && runner.os == 'Windows'
         shell: msys2 {0}
         run: |
-          find build-xplat/ -name "*.exe" 2>/dev/null | \
+          if [ ! -d build-xplat ] || [ -z "$(ls -A build-xplat 2>/dev/null)" ]; then
+            echo "No built binaries found — skipping run step."
+            exit 0
+          fi
+
+          find build-xplat/ -name "*.exe" | sort | \
             while IFS= read -r bin; do
               echo "Running: $bin"
               timeout 30 "$bin" || true
             done
 
       # -----------------------------------------------------------------------
-      # Rust build + test
+      # Rust — build + test
       # -----------------------------------------------------------------------
       - name: Rust — Build
         if: matrix.language == 'rust'
         shell: bash
-        working-directory: rust
-        run: cargo build --all-targets 2>&1 | tail -20
+        run: |
+          if [ ! -d rust ] || [ ! -f rust/Cargo.toml ]; then
+            echo "rust/ directory or Cargo.toml not found — skipping."
+            exit 0
+          fi
+          cd rust
+          cargo build --all-targets 2>&1 | tail -20
 
       - name: Rust — Test
         if: matrix.language == 'rust'
         shell: bash
-        working-directory: rust
-        run: cargo test --all-targets --no-fail-fast 2>&1 | tee ../../rust-test-${{ runner.os }}.txt || true
+        run: |
+          if [ ! -d rust ] || [ ! -f rust/Cargo.toml ]; then
+            echo "rust/ directory or Cargo.toml not found — skipping."
+            exit 0
+          fi
+          cd rust
+          cargo test --all-targets --no-fail-fast \
+            2>&1 | tee ../rust-test-${{ runner.os }}.txt || true
 
       # -----------------------------------------------------------------------
-      # Python build + test
+      # Python — install, compile, test
       # -----------------------------------------------------------------------
       - name: Python — Install deps (Linux/macOS)
         if: matrix.language == 'python' && runner.os != 'Windows'
         shell: bash
         run: |
           pip install --upgrade pip
-          [[ -f python/requirements.txt ]] && pip install -r python/requirements.txt
+          [ -f python/requirements.txt ] && pip install -r python/requirements.txt || true
           pip install pytest
 
       - name: Python — Install deps (Windows)
@@ -224,12 +280,21 @@ jobs:
       - name: Python — Bytecode compile
         if: matrix.language == 'python'
         shell: bash
-        run: python -m compileall -q python/ 2>&1 || true
+        run: |
+          if [ ! -d python ]; then
+            echo "python/ directory not found — skipping."
+            exit 0
+          fi
+          python -m compileall -q python/ 2>&1 || true
 
       - name: Python — pytest
         if: matrix.language == 'python'
         shell: bash
         run: |
+          if [ ! -d python ]; then
+            echo "python/ directory not found — skipping."
+            exit 0
+          fi
           pytest python/ -v --tb=short --no-header --color=yes \
             2>&1 | tee python-test-${{ runner.os }}.txt || true
 
@@ -249,7 +314,7 @@ jobs:
           if-no-files-found: ignore
 
   # ---------------------------------------------------------------------------
-  # Containerized Linux builds — reproducible environments
+  # Containerised Linux builds — reproducible environments
   # ---------------------------------------------------------------------------
   containerized:
     name: Container / ${{ matrix.image }}
@@ -260,32 +325,46 @@ jobs:
         include:
           - image: python:3.12-slim
             language: python
+            install_cmd: "true"
             test_cmd: |
-              cd /workspace && \
-              pip install --quiet pytest && \
-              python -m compileall -q python/ 2>/dev/null || true && \
-              pytest python/ -v --tb=short --color=yes || true
+              cd /workspace
+              pip install --quiet pytest
+              if [ -d python ]; then
+                python -m compileall -q python/ 2>/dev/null || true
+                pytest python/ -v --tb=short --color=yes || true
+              else
+                echo "python/ not found — skipping"
+              fi
 
           - image: rust:slim
             language: rust
+            install_cmd: "true"
             test_cmd: |
-              cd /workspace/rust && \
-              cargo build --all-targets 2>&1 | tail -10 && \
-              cargo test --all-targets --no-fail-fast 2>&1 | tail -20 || true
+              if [ -f /workspace/rust/Cargo.toml ]; then
+                cd /workspace/rust
+                cargo build --all-targets 2>&1 | tail -10
+                cargo test --all-targets --no-fail-fast 2>&1 | tail -20 || true
+              else
+                echo "rust/Cargo.toml not found — skipping"
+              fi
 
           - image: ubuntu:24.04
             language: c
             install_cmd: |
-              apt-get update -q && \
+              apt-get update -q
               apt-get install -y --no-install-recommends gcc clang make
             test_cmd: |
-              mkdir -p /tmp/build && \
-              find /workspace/c -name "*.c" 2>/dev/null | sort | \
-                while IFS= read -r src; do \
-                  name="$(basename "${src%.c}")" && \
-                  clang -Wall -std=c17 "$src" -o "/tmp/build/${name}" -lm && \
-                  timeout 10 "/tmp/build/${name}" || true; \
-                done
+              if [ ! -d /workspace/c ]; then
+                echo "c/ not found — skipping"
+              else
+                mkdir -p /tmp/build
+                find /workspace/c -name "*.c" | sort | \
+                  while IFS= read -r src; do
+                    name="$(basename "${src%.c}")"
+                    clang -Wall -std=c17 "$src" -o "/tmp/build/${name}" -lm || true
+                    [ -x "/tmp/build/${name}" ] && timeout 10 "/tmp/build/${name}" || true
+                  done
+              fi
 
     steps:
       - uses: actions/checkout@v6
@@ -296,7 +375,7 @@ jobs:
             --volume "$PWD:/workspace:ro" \
             "${{ matrix.image }}" \
             /bin/sh -c "
-              ${{ matrix.install_cmd || 'true' }}
+              ${{ matrix.install_cmd }}
               ${{ matrix.test_cmd }}
             " 2>&1 | tee container-test-${{ matrix.language }}.txt || true
 
@@ -307,6 +386,7 @@ jobs:
           name: container-test-${{ matrix.language }}
           path: container-test-${{ matrix.language }}.txt
           retention-days: 7
+          if-no-files-found: ignore
 
   # ---------------------------------------------------------------------------
   # ARM64 smoke test via QEMU emulation
@@ -334,7 +414,11 @@ jobs:
             /bin/sh -c "
               python3 --version
               python3 -c 'import platform; print(platform.machine())'
-              python3 -m compileall -q /workspace/python/ 2>/dev/null || true
+              if [ -d /workspace/python ]; then
+                python3 -m compileall -q /workspace/python/ 2>/dev/null || true
+              else
+                echo 'python/ not found — skipping compileall'
+              fi
             " 2>&1 | tee arm64-smoke.txt
 
       - name: Upload ARM64 smoke output
@@ -344,3 +428,4 @@ jobs:
           name: arm64-smoke
           path: arm64-smoke.txt
           retention-days: 7
+          if-no-files-found: ignore
