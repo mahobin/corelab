@@ -1,7 +1,7 @@
 # CoreLab Orchestration Makefile
 
 CC = clang
-CFLAGS = -Wall -Wextra -Wpedantic -Werror -std=c17 -O3 -g
+CFLAGS = -std=c17 -pedantic -Wall -Wextra -Werror -Wconversion -Wsign-conversion -Wshadow -Wundef -Wstrict-prototypes -Wmissing-prototypes -Wmissing-declarations -O3 -flto -march=native -DNDEBUG
 RUSTC = rustc
 PYTHON = python3
 
@@ -17,16 +17,16 @@ help:
 # --- C Execution ---
 run-c:
 	@if [ -z "$(id)" ]; then echo "Error: Provide an id (e.g., make run-c id=0001)"; exit 1; fi
-	$(CC) $(CFLAGS) c/$(id)_*.c -o out_c
-	./out_c
-	@rm out_c
+	$(CC) $(CFLAGS) c/$(id)_*.c -o occ
+	./occ
+	@rm occ
 
 # --- Rust Execution ---
 run-rust:
 	@if [ -z "$(id)" ]; then echo "Error: Provide an id (e.g., make run-rust id=0001)"; exit 1; fi
-	$(RUSTC) rust/$(id)_*.rs -o out_rust
-	./out_rust
-	@rm out_rust
+	$(RUSTC) --edition=2024 rust/$(id)_*.rs -o ors
+	./ors
+	@rm ors
 
 # --- Python Execution ---
 run-py:
