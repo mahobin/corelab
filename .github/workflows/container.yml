@@ -163,7 +163,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
 
       - name: Build and push image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v7.1.0
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
@@ -218,7 +218,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build local image for validation
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v7.1.0
         with:
           context: docker/${{ matrix.image == 'python-env' && 'python' || matrix.image == 'rust-env' && 'rust' || 'c' }}
           file: docker/${{ matrix.image == 'python-env' && 'python' || matrix.image == 'rust-env' && 'rust' || 'c' }}/Dockerfile
