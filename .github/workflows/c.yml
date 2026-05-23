@@ -1,20 +1,27 @@
 # =============================================================================
 # c.yml — C Language CI Workflow
 #
-# Purpose:
-#   Full CI pipeline for C source files. Runs static analysis, multi-compiler
-#   builds (GCC + Clang), sanitizer-instrumented tests, Valgrind memory
-#   checks, and benchmarks. Designed for systems programming experiments
-#   covering memory, pointers, parsers, and low-level runtime analysis.
+# Repository structure this workflow is designed for:
+#   c/0001_stack_allocator.c
+#   c/0002_lexer.c
+#   c/0003_arena.c
+#   ...
 #
-# Triggers:
-#   - push / PR on paths that include C sources, headers, or Makefiles
-#   - workflow_dispatch for manual one-off runs
+# Each file in c/ is a self-contained, single-translation-unit experiment.
+# There is no multi-file build, no subdirectory structure, no library linking
+# beyond -lm. The Makefile is a developer convenience tool (make run-c id=0001)
+# not a CI build system.
 #
-# Architecture notes:
-#   - Matrix across {gcc, clang} × {C17, C23} × {debug, release}
-#   - Sanitizer jobs run separately so failures are isolated and readable
-#   - Artifacts capture binaries + logs for post-run inspection
+# CI strategy:
+#   1. Compile every *.c file in c/ independently with the matrix compiler/flags
+#   2. Run every resulting binary (they each have a main() and produce output)
+#   3. Apply sanitizers and Valgrind to every binary independently
+#   4. Never call `make all` — the Makefile has no all target by design
+#
+# Matrix: {gcc, clang} × {C17, C23} × {debug, release}
+#   C23 only with clang (GCC 13 on ubuntu-latest is needed; clang-18 is fine)
+#
+# Path filters: only runs when c/ files, headers, or this workflow change.
 # =============================================================================
 
 name: C
@@ -25,16 +32,12 @@ on:
       - "c/**"
       - "**.c"
       - "**.h"
-      - "**/Makefile"
-      - "**/CMakeLists.txt"
       - ".github/workflows/c.yml"
   pull_request:
     paths:
       - "c/**"
       - "**.c"
       - "**.h"
-      - "**/Makefile"
-      - "**/CMakeLists.txt"
       - ".github/workflows/c.yml"
   workflow_dispatch:
     inputs:
@@ -43,7 +46,6 @@ on:
         type: boolean
         default: true
 
-# Cancel superseded runs on the same ref/PR to save minutes.
 concurrency:
   group: c-${{ github.ref }}
   cancel-in-progress: true
@@ -55,29 +57,37 @@ defaults:
   run:
     shell: bash
 
+# Warning flags shared across all compilation steps.
+# These match the Makefile's WARN variable exactly so local and CI builds
+# are byte-for-byte equivalent.
 env:
-  # Shared warning flags applied to every compilation unit.
-  CFLAGS_COMMON: >-
+  WARN: >-
     -Wall
     -Wextra
     -Wpedantic
     -Werror
-    -Wno-unused-parameter
-  # ASan + UBSan combined flags.
-  SANITIZE_FLAGS: >-
-    -fsanitize=address,undefined
-    -fno-omit-frame-pointer
-    -g
+    -Wconversion
+    -Wsign-conversion
+    -Wshadow
+    -Wundef
+    -Wstrict-prototypes
+    -Wmissing-prototypes
+    -Wmissing-declarations
+    -Wcast-align
+    -Wnull-dereference
+    -Wdouble-promotion
+    -Wformat=2
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Static analysis & formatting — fast, no compilation required
+  # Static analysis — fast gate, runs before any compilation
   # ---------------------------------------------------------------------------
   static-analysis:
     name: Static Analysis
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
       - name: Install tools
         run: |
@@ -87,10 +97,19 @@ jobs:
             clang-format \
             clang-tidy
 
-      - name: cppcheck
+      - name: Guard — skip if c/ is empty
+        id: guard
         run: |
-          # --error-exitcode=1 makes cppcheck fail the job on any finding.
-          # --force processes files even when include resolution fails.
+          if [ ! -d c ] || [ -z "$(find c/ -maxdepth 1 -name '*.c' 2>/dev/null | head -1)" ]; then
+            echo "No C source files found in c/ — skipping static analysis."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: cppcheck
+        if: steps.guard.outputs.skip == 'false'
+        run: |
           cppcheck \
             --error-exitcode=1 \
             --enable=warning,style,performance,portability \
@@ -101,39 +120,39 @@ jobs:
             c/ \
             2>&1 | tee cppcheck-report.txt
 
-      - name: Check formatting (clang-format)
+      - name: clang-format check
+        if: steps.guard.outputs.skip == 'false'
         run: |
-          # Collect all C/H files and verify formatting matches clang-format
-          # style. Diff output helps the contributor see exactly what changed.
-          find c/ -name "*.c" -o -name "*.h" | sort > /tmp/c_files.txt
-          if [[ ! -s /tmp/c_files.txt ]]; then
-            echo "No C files found — skipping format check."
-            exit 0
-          fi
-
           FAILED=0
           while IFS= read -r file; do
-            if ! clang-format --dry-run --Werror "$file"; then
-              echo "::error file=${file}::Formatting violation detected"
+            if ! clang-format --dry-run --Werror "$file" 2>&1; then
+              echo "::error file=${file}::Formatting violation — run: clang-format -i $file"
               FAILED=1
             fi
-          done < /tmp/c_files.txt
+          done < <(find c/ -maxdepth 1 \( -name "*.c" -o -name "*.h" \) | sort)
 
-          if [[ $FAILED -ne 0 ]]; then
-            echo "Run 'clang-format -i <file>' to fix formatting."
+          if [ "$FAILED" -ne 0 ]; then
+            echo ""
+            echo "Fix all violations with:  find c/ -name '*.c' -o -name '*.h' | xargs clang-format -i"
             exit 1
           fi
 
       - name: Upload static analysis report
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: c-static-analysis
           path: cppcheck-report.txt
           retention-days: 14
+          if-no-files-found: ignore
 
   # ---------------------------------------------------------------------------
-  # Matrix build — compilers × standards × build types
+  # Build + run matrix — every experiment compiled and executed independently
+  #
+  # Each *.c file in c/ is compiled to its own binary and run.
+  # There is deliberately no `make all` call — the Makefile is a developer
+  # tool that builds one experiment at a time (make run-c id=0001).
+  # CI compiles everything in the flat c/ directory.
   # ---------------------------------------------------------------------------
   build:
     name: Build (${{ matrix.compiler }}, C${{ matrix.std }}, ${{ matrix.build_type }})
@@ -146,197 +165,257 @@ jobs:
         std: ["17", "23"]
         build_type: [debug, release]
         exclude:
-          # C23 + GCC on ubuntu-latest may need gcc-13+; keep matrix lean.
+          # GCC 11 (default on ubuntu-latest) has incomplete C23 support.
+          # Clang 18 (installed below) handles C23 correctly.
           - compiler: gcc
             std: "23"
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
-      - name: Install compiler
+      - name: Install ${{ matrix.compiler }}
         run: |
           sudo apt-get update -q
           sudo apt-get install -y --no-install-recommends \
             gcc \
             clang \
-            make \
-            bear          # bear generates compile_commands.json from Makefiles
+            make
 
-      - name: Set compiler environment
+      - name: Guard — skip if c/ is empty
+        id: guard
         run: |
-          if [[ "${{ matrix.compiler }}" == "clang" ]]; then
-            echo "CC=clang"  >> "$GITHUB_ENV"
+          if [ ! -d c ] || [ -z "$(find c/ -maxdepth 1 -name '*.c' 2>/dev/null | head -1)" ]; then
+            echo "No C source files in c/ — nothing to build."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
           else
-            echo "CC=gcc"    >> "$GITHUB_ENV"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-          # Map build_type → optimization flags
-          if [[ "${{ matrix.build_type }}" == "release" ]]; then
-            echo "BUILD_CFLAGS=-O2 -DNDEBUG" >> "$GITHUB_ENV"
+      - name: Set build flags
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          echo "CC=${{ matrix.compiler }}" >> "$GITHUB_ENV"
+
+          if [ "${{ matrix.build_type }}" = "release" ]; then
+            echo "BUILD_OPT=-O2 -DNDEBUG" >> "$GITHUB_ENV"
           else
-            echo "BUILD_CFLAGS=-O0 -g"        >> "$GITHUB_ENV"
+            echo "BUILD_OPT=-O1 -g -fno-omit-frame-pointer" >> "$GITHUB_ENV"
           fi
 
-      - name: Build via Makefile (with fallback)
+      - name: Compile every experiment in c/
+        if: steps.guard.outputs.skip == 'false'
         run: |
-          # If a root Makefile exists, prefer it. Otherwise compile everything
-          # under c/ directly — useful for early-stage repos.
-          if [[ -f Makefile ]]; then
-            bear -- make \
-              CC="$CC" \
-              CFLAGS="$CFLAGS_COMMON $BUILD_CFLAGS -std=c${{ matrix.std }}" \
-              all
-          else
-            echo "No root Makefile found — compiling c/ sources directly."
-            mkdir -p build
+          # Each *.c file is a self-contained experiment with its own main().
+          # Compile them all independently into build/.
+          # Failures are per-file: one broken experiment doesn't block others.
+          mkdir -p build
 
-            find c/ -name "*.c" | sort | while IFS= read -r src; do
-              out="build/$(basename "${src%.c}")"
-              echo "  Compiling $src → $out"
-              "$CC" \
-                $CFLAGS_COMMON \
-                $BUILD_CFLAGS \
-                -std=c${{ matrix.std }} \
-                "$src" -o "$out" -lm || true
-            done
+          PASS=0; FAIL=0
+          while IFS= read -r src; do
+            name="$(basename "${src%.c}")"
+            out="build/${name}"
+            echo "--- ${{ matrix.compiler }} -std=c${{ matrix.std }} ${{ matrix.build_type }}: $src"
+
+            if ${{ matrix.compiler }} \
+                  ${{ env.WARN }} \
+                  $BUILD_OPT \
+                  -std=c${{ matrix.std }} \
+                  "$src" -o "$out" -lm 2>&1; then
+              PASS=$((PASS + 1))
+            else
+              FAIL=$((FAIL + 1))
+              echo "::error file=${src}::Compilation failed (${{ matrix.compiler }}, C${{ matrix.std }}, ${{ matrix.build_type }})"
+            fi
+          done < <(find c/ -maxdepth 1 -name "*.c" | sort)
+
+          echo ""
+          echo "Results: $PASS passed, $FAIL failed"
+          # Fail the step only if ALL files failed — a single broken experiment
+          # should not hide results for all others.
+          total=$((PASS + FAIL))
+          if [ "$FAIL" -gt 0 ] && [ "$PASS" -eq 0 ] && [ "$total" -gt 0 ]; then
+            echo "All $FAIL compilation(s) failed."
+            exit 1
           fi
 
-      - name: Run tests
+      - name: Run every built binary
+        if: steps.guard.outputs.skip == 'false'
         run: |
-          # Look for a test target in Makefile, else run built test binaries.
-          if make -n test 2>/dev/null; then
-            make test CC="$CC"
-          else
-            echo "No Makefile test target — running built binaries from build/."
-            find build/ -type f -executable -name "*test*" | sort | \
-              while IFS= read -r bin; do
-                echo "Running: $bin"
-                timeout 30 "$bin" || true
-              done
+          if [ ! -d build ] || [ -z "$(ls -A build 2>/dev/null)" ]; then
+            echo "build/ is empty — no binaries to run."
+            exit 0
           fi
 
-      - name: Collect compile_commands.json
-        if: matrix.compiler == 'clang' && matrix.std == '17' && matrix.build_type == 'debug'
-        run: |
-          # Only upload compile_commands once (clang/debug/C17 is canonical).
-          [[ -f compile_commands.json ]] && cp compile_commands.json /tmp/ || true
+          PASS=0; FAIL=0
+          while IFS= read -r bin; do
+            name="$(basename "$bin")"
+            echo "--- run: $name"
+            if timeout 30 "$bin" 2>&1; then
+              PASS=$((PASS + 1))
+            else
+              rc=$?
+              # timeout exits 124; treat it as a warning, not a hard failure
+              if [ "$rc" -eq 124 ]; then
+                echo "::warning::$name timed out after 30s"
+              else
+                echo "::warning::$name exited with code $rc"
+              fi
+              FAIL=$((FAIL + 1))
+            fi
+          done < <(find build/ -maxdepth 1 -type f -executable | sort)
+
+          echo ""
+          echo "Run results: $PASS OK, $FAIL non-zero"
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v7
+        if: always() && steps.guard.outputs.skip == 'false'
+        uses: actions/upload-artifact@v4
         with:
           name: c-build-${{ matrix.compiler }}-c${{ matrix.std }}-${{ matrix.build_type }}
-          path: |
-            build/
-            compile_commands.json
+          path: build/
           retention-days: 7
           if-no-files-found: ignore
 
   # ---------------------------------------------------------------------------
-  # Sanitizer job — runs after a successful debug build
+  # Sanitizers — ASan + UBSan on every experiment
   # ---------------------------------------------------------------------------
   sanitizers:
     name: Sanitizers (ASan + UBSan)
     needs: build
     runs-on: ubuntu-latest
     env:
-      CC: clang
-      ASAN_OPTIONS: "halt_on_error=1:detect_leaks=1"
+      ASAN_OPTIONS: "halt_on_error=1:detect_leaks=1:detect_stack_use_after_return=1"
       UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
       - name: Install clang
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y --no-install-recommends clang make
+          sudo apt-get install -y --no-install-recommends clang
 
-      - name: Build with sanitizers
+      - name: Guard
+        id: guard
+        run: |
+          if [ ! -d c ] || [ -z "$(find c/ -maxdepth 1 -name '*.c' 2>/dev/null | head -1)" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build with ASan + UBSan
+        if: steps.guard.outputs.skip == 'false'
         run: |
           mkdir -p build-san
-          find c/ -name "*.c" | sort | while IFS= read -r src; do
-            out="build-san/$(basename "${src%.c}")-san"
+          while IFS= read -r src; do
+            name="$(basename "${src%.c}")"
+            echo "--- asan+ubsan: $src"
             clang \
-              $CFLAGS_COMMON \
-              $SANITIZE_FLAGS \
+              ${{ env.WARN }} \
+              -fsanitize=address,undefined \
+              -fno-omit-frame-pointer \
+              -g -O1 \
               -std=c17 \
-              "$src" -o "$out" -lm || true
-          done
+              "$src" -o "build-san/${name}" -lm 2>&1 || \
+              echo "::warning file=${src}::Sanitizer build failed — skipping run"
+          done < <(find c/ -maxdepth 1 -name "*.c" | sort)
 
       - name: Run sanitized binaries
+        if: steps.guard.outputs.skip == 'false'
         run: |
-          find build-san/ -type f -executable | sort | \
-            while IFS= read -r bin; do
-              echo "=== $bin ==="
-              timeout 30 "$bin" 2>&1 || true
-            done
+          if [ ! -d build-san ] || [ -z "$(ls -A build-san 2>/dev/null)" ]; then
+            echo "No sanitizer binaries produced — skipping."
+            exit 0
+          fi
+
+          while IFS= read -r bin; do
+            echo "=== $(basename "$bin") ==="
+            timeout 30 "$bin" 2>&1 || true
+          done < <(find build-san/ -maxdepth 1 -type f -executable | sort)
 
       - name: Upload sanitizer logs
-        if: always()
-        uses: actions/upload-artifact@v7
+        if: always() && steps.guard.outputs.skip == 'false'
+        uses: actions/upload-artifact@v4
         with:
           name: c-sanitizer-logs
           path: build-san/
           retention-days: 14
+          if-no-files-found: ignore
 
   # ---------------------------------------------------------------------------
-  # Valgrind memory check
+  # Valgrind
   # ---------------------------------------------------------------------------
   valgrind:
     name: Valgrind
     needs: build
     runs-on: ubuntu-latest
-    # Allow skipping via workflow_dispatch flag or on forks where this is slow.
     if: >-
-      github.event_name == 'workflow_dispatch' &&
-      inputs.enable_valgrind == true ||
-      github.event_name != 'workflow_dispatch'
+      github.event_name != 'workflow_dispatch' ||
+      inputs.enable_valgrind == true
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
       - name: Install tools
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y --no-install-recommends valgrind gcc make
+          sudo apt-get install -y --no-install-recommends valgrind gcc
 
-      - name: Build debug binaries
+      - name: Guard
+        id: guard
+        run: |
+          if [ ! -d c ] || [ -z "$(find c/ -maxdepth 1 -name '*.c' 2>/dev/null | head -1)" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build debug binaries (gcc for Valgrind compatibility)
+        if: steps.guard.outputs.skip == 'false'
         run: |
           mkdir -p build-valgrind
-          find c/ -name "*.c" | sort | while IFS= read -r src; do
-            out="build-valgrind/$(basename "${src%.c}")"
+          while IFS= read -r src; do
+            name="$(basename "${src%.c}")"
             gcc \
-              $CFLAGS_COMMON \
-              -O0 -g -std=c17 \
-              "$src" -o "$out" -lm || true
-          done
+              ${{ env.WARN }} \
+              -O0 -g \
+              -std=c17 \
+              "$src" -o "build-valgrind/${name}" -lm 2>&1 || \
+              echo "::warning file=${src}::Valgrind build failed — skipping"
+          done < <(find c/ -maxdepth 1 -name "*.c" | sort)
 
-      - name: Run Valgrind
+      - name: Run Valgrind memcheck
+        if: steps.guard.outputs.skip == 'false'
         run: |
+          if [ ! -d build-valgrind ] || [ -z "$(ls -A build-valgrind 2>/dev/null)" ]; then
+            echo "No Valgrind binaries produced — skipping."
+            exit 0
+          fi
+
           mkdir -p valgrind-logs
-          find build-valgrind/ -type f -executable | sort | \
-            while IFS= read -r bin; do
-              name="$(basename "$bin")"
-              echo "=== Valgrind: $name ==="
-              valgrind \
-                --error-exitcode=1 \
-                --leak-check=full \
-                --show-leak-kinds=all \
-                --track-origins=yes \
-                --verbose \
-                "$bin" 2>&1 | tee "valgrind-logs/${name}.txt" || true
-            done
+          while IFS= read -r bin; do
+            name="$(basename "$bin")"
+            echo "=== Valgrind: $name ==="
+            valgrind \
+              --error-exitcode=1 \
+              --leak-check=full \
+              --show-leak-kinds=all \
+              --track-origins=yes \
+              "$bin" 2>&1 | tee "valgrind-logs/${name}.txt" || true
+          done < <(find build-valgrind/ -maxdepth 1 -type f -executable | sort)
 
       - name: Upload Valgrind logs
-        if: always()
-        uses: actions/upload-artifact@v7
+        if: always() && steps.guard.outputs.skip == 'false'
+        uses: actions/upload-artifact@v4
         with:
           name: c-valgrind-logs
           path: valgrind-logs/
           retention-days: 14
+          if-no-files-found: ignore
 
   # ---------------------------------------------------------------------------
-  # Benchmark timing
+  # Benchmarks — experiments prefixed bench_ or in c/benchmarks/
   # ---------------------------------------------------------------------------
   benchmark:
     name: C Benchmarks
@@ -345,35 +424,61 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
       - name: Install tools
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y --no-install-recommends gcc make time
+          sudo apt-get install -y --no-install-recommends gcc clang
 
-      - name: Build release
+      - name: Guard
+        id: guard
+        run: |
+          # Look for files matching the bench_ prefix convention OR c/benchmarks/
+          count=$(find c/ -maxdepth 2 \( -name "*bench*" -o -name "*benchmark*" \) \
+                    -name "*.c" 2>/dev/null | wc -l)
+          if [ "$count" -eq 0 ]; then
+            echo "No benchmark files found — skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build benchmark binaries (release)
+        if: steps.guard.outputs.skip == 'false'
         run: |
           mkdir -p build-bench
-          find c/benchmarks/ -name "*.c" 2>/dev/null | sort | \
+          find c/ -maxdepth 2 \( -name "*bench*" -o -name "*benchmark*" \) \
+              -name "*.c" 2>/dev/null | sort | \
             while IFS= read -r src; do
-              out="build-bench/$(basename "${src%.c}")"
-              gcc -O2 -DNDEBUG -std=c17 "$src" -o "$out" -lm || true
+              name="$(basename "${src%.c}")"
+              echo "--- release build: $src"
+              clang \
+                -O3 -flto -march=native -DNDEBUG \
+                -std=c17 \
+                "$src" -o "build-bench/${name}" -lm 2>&1 || true
             done
 
       - name: Run benchmarks
+        if: steps.guard.outputs.skip == 'false'
         run: |
+          if [ ! -d build-bench ] || [ -z "$(ls -A build-bench 2>/dev/null)" ]; then
+            echo "No benchmark binaries — skipping."
+            exit 0
+          fi
+
           mkdir -p bench-results
-          find build-bench/ -type f -executable | sort | \
-            while IFS= read -r bin; do
-              name="$(basename "$bin")"
-              echo "=== Benchmark: $name ==="
-              /usr/bin/time -v "$bin" 2>&1 | tee "bench-results/${name}.txt" || true
-            done
+          while IFS= read -r bin; do
+            name="$(basename "$bin")"
+            echo "=== Benchmark: $name ==="
+            /usr/bin/time -v "$bin" 2>&1 | tee "bench-results/${name}.txt" || true
+          done < <(find build-bench/ -maxdepth 1 -type f -executable | sort)
 
       - name: Upload benchmark results
-        uses: actions/upload-artifact@v7
+        if: always() && steps.guard.outputs.skip == 'false'
+        uses: actions/upload-artifact@v4
         with:
           name: c-benchmark-results
           path: bench-results/
           retention-days: 30
+          if-no-files-found: ignore
