@@ -151,9 +151,6 @@ jobs:
         shell: bash
         run: |
           # Guard: if c/ doesn't exist yet the step is a clean no-op (exit 0).
-          # `find c/` exits 1 when the directory is absent even with 2>/dev/null
-          # because only stderr is suppressed — the non-zero exit still fails
-          # the pipeline. The explicit directory check fixes this permanently.
           if [ ! -d c ]; then
             echo "c/ directory not found — nothing to build yet."
             exit 0
@@ -164,33 +161,75 @@ jobs:
           find c/ -name "*.c" | sort | \
             while IFS= read -r src; do
               name="$(basename "${src%.c}")"
-              echo "Compiling: $src"
-              clang -Wall -Wextra -std=c17 "$src" -o "build-xplat/${name}" -lm || true
+              rel_dir="$(dirname "${src#c/}")"
+              
+              # Preserve nested subdirectory structures to avoid name collisions
+              if [ "$rel_dir" = "." ]; then
+                target_bin="build-xplat/${name}"
+              else
+                mkdir -p "build-xplat/${rel_dir}"
+                target_bin="build-xplat/${rel_dir}/${name}"
+              fi
+
+              echo "Compiling: $src -> $target_bin"
+              clang -Wall -Wextra -std=c17 "$src" -o "$target_bin" -lm || true
             done
 
           echo "Build complete. Binaries:"
-          ls -la build-xplat/ 2>/dev/null || echo "  (none produced)"
+          # Recursively check if any files were built
+          if [ -n "$(find build-xplat/ -type f 2>/dev/null)" ]; then
+            find build-xplat/ -type f | sort
+          else
+            echo "  (none produced)"
+          fi
 
       # -----------------------------------------------------------------------
       # C — build (Windows / MSYS2)
       # -----------------------------------------------------------------------
-      - name: C — Build (Windows/MSYS2)
+      - name: Set up MSVC
         if: matrix.language == 'c' && runner.os == 'Windows'
-        shell: msys2 {0}
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+
+      - name: C — Build (Windows/MSVC)
+        if: matrix.language == 'c' && runner.os == 'Windows'
+        shell: pwsh
         run: |
-          if [ ! -d c ]; then
-            echo "c/ directory not found — nothing to build yet."
+          if (-not (Test-Path -Path "c" -PathType Container)) {
+            Write-Host "c/ directory not found — nothing to build yet."
             exit 0
-          fi
+          }
 
-          mkdir -p build-xplat
+          New-Item -ItemType Directory -Force -Path "build-xplat" | Out-Null
 
-          find c/ -name "*.c" | sort | \
-            while IFS= read -r src; do
-              name="$(basename "${src%.c}")"
-              echo "Compiling: $src"
-              gcc -Wall -Wextra -std=c17 "$src" -o "build-xplat/${name}.exe" -lm || true
-            done
+          # Recursively find and sort .c files
+          Get-ChildItem -Path "c" -Filter "*.c" -Recurse | Sort-Object FullName | ForEach-Object {
+            $src = $_.FullName
+            $name = $_.BaseName
+            
+            # Recreate nested directory structures
+            $relPath = [System.IO.Path]::GetRelativePath((Join-Path (Get-Location).Path "c"), $src)
+            $relDir = [System.IO.Path]::GetDirectoryName($relPath)
+
+            if ([string]::IsNullOrEmpty($relDir)) {
+              $targetDir = "build-xplat"
+            } else {
+              $targetDir = "build-xplat\$relDir"
+              New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+            }
+
+            $targetBin = Join-Path $targetDir "${name}.exe"
+            $objDir = "$targetDir\"  # MSVC requires trailing backslash for Fo directory
+
+            Write-Host "Compiling: $relPath -> $targetBin"
+            cl.exe /W4 /std:c17 "$src" /Fo"$objDir" /Fe"$targetBin"
+          }
+
+          Write-Host "Build complete. Binaries:"
+          if (Test-Path -Path "build-xplat") {
+            Get-ChildItem -Path "build-xplat" -Filter "*.exe" -Recurse | Select-Object -ExpandProperty FullName | Sort-Object
+          } else {
+            Write-Host "  (none produced)"
+          }
 
       # -----------------------------------------------------------------------
       # C — run (Linux / macOS)
@@ -205,11 +244,26 @@ jobs:
             echo "No built binaries found — skipping run step."
             exit 0
           fi
-
-          find build-xplat/ -type f -executable | sort | \
+          
+          # Find all files recursively and check execution permissions inside the loop
+          find build-xplat/ -type f | sort | \
             while IFS= read -r bin; do
-              echo "Running: $bin"
-              timeout 30 "$bin" || true
+              if [ -x "$bin" ]; then
+                echo "Running: $bin"
+                
+                # Cross-platform timeout handling:
+                # 1. Use GNU 'timeout' if available (standard Linux)
+                # 2. Use Homebrew 'gtimeout' if available (some macOS environments)
+                # 3. Fallback to Perl 'alarm' (pre-installed by default on both Linux and macOS)
+                if command -v timeout &> /dev/null; then
+                  timeout 30 "$bin" || true
+                elif command -v gtimeout &> /dev/null; then
+                  gtimeout 30 "$bin" || true
+                else
+                  # Triggers a SIGALRM after 30 seconds, terminating the process if it hangs
+                  perl -e 'alarm shift; exec @ARGV' 30 "$bin" || true
+                fi
+              fi
             done
 
       # -----------------------------------------------------------------------
@@ -217,18 +271,34 @@ jobs:
       # -----------------------------------------------------------------------
       - name: C — Run tests (Windows)
         if: matrix.language == 'c' && runner.os == 'Windows'
-        shell: msys2 {0}
+        shell: pwsh
         run: |
-          if [ ! -d build-xplat ] || [ -z "$(ls -A build-xplat 2>/dev/null)" ]; then
-            echo "No built binaries found — skipping run step."
+          # Check if the folder exists and actually contains .exe files (ignoring .obj files)
+          if (-not (Test-Path -Path "build-xplat") -or @(Get-ChildItem -Path "build-xplat" -Filter "*.exe" -Recurse).Count -eq 0) {
+            Write-Host "No built binaries found — skipping run step."
             exit 0
-          fi
+          }
 
-          find build-xplat/ -name "*.exe" | sort | \
-            while IFS= read -r bin; do
-              echo "Running: $bin"
-              timeout 30 "$bin" || true
-            done
+          # Find and run each compiled .exe sequentially
+          Get-ChildItem -Path "build-xplat" -Filter "*.exe" -Recurse | Sort-Object FullName | ForEach-Object {
+            $bin = $_.FullName
+            Write-Host "Running: $bin"
+            
+            # Start the binary natively
+            $proc = Start-Process -FilePath $bin -PassThru -NoNewWindow -ErrorAction SilentlyContinue
+            if ($proc) {
+              # Wait up to 30 seconds for the program to exit
+              $proc | Wait-Process -Timeout 30 -ErrorAction SilentlyContinue
+              
+              # If the program is still running after 30 seconds, terminate it
+              if (-not $proc.HasExited) {
+                Write-Host "Warning: $bin timed out. Killing process..."
+                $proc | Stop-Process -Force -ErrorAction SilentlyContinue
+              }
+            } else {
+              Write-Host "Error: Failed to start $bin"
+            }
+          }
 
       # -----------------------------------------------------------------------
       # Rust — build + test
@@ -399,7 +469,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+        uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4.1.0
         with:
           platforms: linux/arm64
 

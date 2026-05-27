@@ -247,12 +247,16 @@ jobs:
       - name: Run benchmarks
         run: |
           mkdir -p bench-results
-          find python/benchmarks/ -name "*.py" 2>/dev/null | sort | \
-            while IFS= read -r script; do
-              name="$(basename "${script%.py}")"
-              echo "=== Benchmark: $name ==="
-              python "$script" 2>&1 | tee "bench-results/${name}.txt" || true
-            done
+          if [ -d "python/benchmarks" ]; then
+            find python/benchmarks/ -name "*.py" 2>/dev/null | sort | \
+              while IFS= read -r script; do
+                name="$(basename "${script%.py}")"
+                echo "=== Benchmark: $name ==="
+                python "$script" 2>&1 | tee "bench-results/${name}.txt" || true
+              done
+          else
+            echo "Directory python/benchmarks/ not found. Skipping benchmarks."
+          fi
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
