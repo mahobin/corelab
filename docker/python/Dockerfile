@@ -125,8 +125,6 @@ RUN pip install \
         line_profiler \
         memory_profiler \
         py-spy \
-        mkdocs \
-        mkdocs-material \
         jupyterlab
 
 RUN apt-get update -q && \

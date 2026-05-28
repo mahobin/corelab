@@ -9,7 +9,6 @@
 [![Rust Pipeline](https://github.com/mahobin/corelab/actions/workflows/rust.yml/badge.svg)](https://github.com/mahobin/corelab/actions/workflows/rust.yml)
 [![Python Pipeline](https://github.com/mahobin/corelab/actions/workflows/python.yml/badge.svg)](https://github.com/mahobin/corelab/actions/workflows/python.yml)
 [![Security](https://github.com/mahobin/corelab/actions/workflows/security.yml/badge.svg)](https://github.com/mahobin/corelab/actions/workflows/security.yml)
-[![Docs](https://github.com/mahobin/corelab/actions/workflows/docs.yml/badge.svg)](https://github.com/mahobin/corelab/actions/workflows/docs.yml)
 
 ---
 
@@ -37,7 +36,6 @@ All workflows live in [`.github/workflows/`](.github/workflows/). Path filters e
 | [`c.yml`](.github/workflows/c.yml) | `c/**`, `*.c`, `*.h` | GCC + Clang matrix · ASan/UBSan · Valgrind · cppcheck |
 | [`rust.yml`](.github/workflows/rust.yml) | `rust/**`, `*.rs` | fmt · clippy · stable + nightly · Miri · docs · cargo-audit |
 | [`python.yml`](.github/workflows/python.yml) | `python/**`, `*.py` | ruff · black · mypy · pytest 3.11–3.13 · coverage |
-| [`docs.yml`](.github/workflows/docs.yml) | `docs/**`, `*.md` | MkDocs strict build · link validation · Pages deploy on `main` |
 | [`container.yml`](.github/workflows/container.yml) | `docker/**` | Buildx multi-arch (amd64 + arm64) · GHCR publish |
 | [`fuzz.yml`](.github/workflows/fuzz.yml) | Scheduled (weekly) + manual | AFL++ · libFuzzer · cargo-fuzz · Atheris · crash artifacts |
 | [`sanitizer.yml`](.github/workflows/sanitizer.yml) | C/Rust paths | ASan · UBSan · LSan · TSan matrix across both languages |
@@ -69,7 +67,7 @@ clang -Wall -Wextra -Wpedantic -Werror \
       -std=c17 -O0 -g \
       -fsanitize=address,undefined \
       -fno-omit-frame-pointer \
-      c/0001_memory_layout.c -o out
+      c/0001_hello_world.c -o out
 ```
 
 ---
@@ -175,15 +173,15 @@ git clone https://github.com/mahobin/corelab.git
 cd corelab
 
 # C — compile and run an isolated experiment
-clang -Wall -std=c17 c/0001_memory_layout.c -o /tmp/mem_test && /tmp/mem_test
+clang -Wall -std=c17 c/0001_hello_world.c -o /tmp/mem_test && /tmp/mem_test
 
 # Rust — lint a specific experiment file
-rustc -W clippy::all rust/0001_ownership_move.rs
+rustc -W clippy::all rust/0001_hello_world.rs
 
 # Python — type-check and lint an experiment
 pip install ruff mypy
-mypy --strict python/0001_bytecode_dis.py
-ruff check python/0001_bytecode_dis.py
+mypy --strict python/0001_hello_world.py
+ruff check python/0001_hello_world.py
 ```
 
 ### Editor Setup
@@ -260,18 +258,6 @@ cargo audit --deny warnings
 # Python
 pip install pip-audit
 pip-audit
-```
-
----
-
-## Documentation
-
-Docs are built with [MkDocs Material](https://squidfunk.github.io/mkdocs-material/) and deployed to GitHub Pages on every push to `main`.
-
-```sh
-pip install mkdocs mkdocs-material
-mkdocs serve           # local preview — http://localhost:8000
-mkdocs build --strict  # full validation before pushing
 ```
 
 ---
