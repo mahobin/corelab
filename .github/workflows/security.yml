@@ -134,7 +134,7 @@ jobs:
           restore-keys: cargo-audit-${{ runner.os }}-
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        run: cargo install cargo-audit
 
       - name: Run cargo audit
         # Exit code is non-zero when vulnerabilities are found.
@@ -301,7 +301,7 @@ jobs:
       - name: Install SBOM tools
         run: |
           pip install cyclonedx-bom
-          cargo install cargo-cyclonedx --locked || true
+          cargo install cargo-cyclonedx || true
 
       - name: Generate Python SBOM
         run: |
