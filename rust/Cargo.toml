@@ -1,13 +1,16 @@
 [package]
 name = "corelab-rust"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 # Map the main entry point only. 
 # Helper files (like 0002_utils.rs) do NOT need a [[bin]] entry.
 [[bin]]
 name = "0001_hello_world"
 path = "0001_hello_world.rs"
+[[bin]]
+name = "0002_simple_sum"
+path = "0002_simple_sum.rs"
 
 [profile.release]
 opt-level = 3

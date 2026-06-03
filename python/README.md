@@ -17,7 +17,8 @@ This directory explores the CPython interpreter, language internals, and high-le
 
 | ID | File | Topic | Technical Details | Status |
 |:---|:---|:---|:---|:---|
-| 0001 | [`0001_hello_world.py`](./0001_hello_world.py) | Runtime | Print Hello World. | ✅ |
+| 0001 | [`0001_hello_world.py`](./0001_hello_world.py) | Runtime | Demonstrates Python script execution flow using a single `print()` statement, showing interpreter-driven runtime execution without explicit entry-point boilerplate such as `main()` functions. | ✅ |
+| 0002 | [`0002_simple_sum.py`](./0002_simple_sum.py) | Simple Sum | Demonstrates basic integer arithmetic using variables `a`, `b`, and `sum`, function encapsulation via `main()`, formatted string output using f-strings, and explicit program execution by directly invoking `main()`. | ✅ |
 
 ---
 **Execution:** `make run-py id=0001`
