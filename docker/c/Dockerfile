@@ -41,7 +41,9 @@ ENV LANG=C.UTF-8 \
 
 # Enable EPEL (Extra Packages for Enterprise Linux) and CRB (CodeReady Linux
 # Builder). EPEL provides AFL++, cppcheck, bear. CRB unlocks -devel packages.
-RUN dnf install -y epel-release dnf-plugins-core && \
+RUN dnf -y update --refresh && \
+    dnf -y upgrade && \
+    dnf install -y epel-release dnf-plugins-core && \
     dnf config-manager --set-enabled crb && \
     dnf install -y --allowerasing \
         gcc \

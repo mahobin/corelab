@@ -61,11 +61,11 @@ WARN := \
 
 # Dev build: -O1 keeps code recognisable in a debugger while still exercising
 # the optimiser's basic transforms. -g + frame pointer for clean stack traces.
-DEV_FLAGS := -std=c17 $(WARN) -O1 -g -fno-omit-frame-pointer
+DEV_FLAGS := -std=c23 $(WARN) -O1 -g -fno-omit-frame-pointer
 
 # Release build: used only by bench-c and `make all` release variant.
 # Never used for correctness tests — sanitizers and -O3 interact badly.
-REL_FLAGS := -std=c17 $(WARN) -O3 -flto -march=native -DNDEBUG
+REL_FLAGS := -std=c23 $(WARN) -O3 -flto -march=native -DNDEBUG
 
 # Sanitizer flag sets
 SAN_ASAN := -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1
