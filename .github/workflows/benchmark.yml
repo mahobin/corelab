@@ -40,7 +40,7 @@ on:
     paths:
       - "c/benchmarks/**"
       - "rust/benches/**"
-      - "python/benchmarks/**"
+      - "Python/benchmarks/**"
       - ".github/workflows/benchmark.yml"
 
 concurrency:
@@ -224,7 +224,7 @@ jobs:
       - name: Install deps + pyperf
         run: |
           pip install --upgrade pip pyperf
-          [[ -f python/requirements.txt ]] && pip install -r python/requirements.txt
+          [[ -f Python/requirements.txt ]] && pip install -r Python/requirements.txt
 
       - name: Install hyperfine
         run: |
@@ -268,7 +268,7 @@ jobs:
 
       - name: hyperfine Python scripts
         run: |
-          find python/benchmarks/ -name "bench_*.py" 2>/dev/null | sort | \
+          find Python/benchmarks/ -name "bench_*.py" 2>/dev/null | sort | \
             while IFS= read -r script; do
               name="$(basename "${script%.py}")"
               hyperfine \

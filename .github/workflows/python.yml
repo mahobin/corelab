@@ -22,7 +22,7 @@ name: Python
 on:
   push:
     paths:
-      - "python/**"
+      - "Python/**"
       - "**.py"
       - "requirements*.txt"
       - "pyproject.toml"
@@ -30,7 +30,7 @@ on:
       - ".github/workflows/python.yml"
   pull_request:
     paths:
-      - "python/**"
+      - "Python/**"
       - "**.py"
       - "requirements*.txt"
       - "pyproject.toml"
@@ -77,13 +77,13 @@ jobs:
 
       - name: ruff check
         run: |
-          ruff check python/ \
+          ruff check Python/ \
             --output-format=github \
             2>&1 | tee ruff-report.txt
 
       - name: black --check
         run: |
-          black --check --diff python/ \
+          black --check --diff Python/ \
             2>&1 | tee black-report.txt
 
       - name: Upload lint reports
@@ -125,13 +125,13 @@ jobs:
             pip install -r requirements.txt
           fi
           if [[ -f python/requirements.txt ]]; then
-            pip install -r python/requirements.txt
+            pip install -r Python/requirements.txt
           fi
           pip install mypy
 
       - name: mypy
         run: |
-          mypy python/ \
+          mypy Python/ \
             --ignore-missing-imports \
             --show-error-codes \
             --pretty \
@@ -179,18 +179,18 @@ jobs:
           pip install --upgrade pip
           # Install from root requirements if present.
           [[ -f requirements.txt ]]        && pip install -r requirements.txt
-          [[ -f python/requirements.txt ]] && pip install -r python/requirements.txt
+          [[ -f Python/requirements.txt ]] && pip install -r Python/requirements.txt
           # Always install test tooling.
           pip install pytest pytest-cov
 
       - name: Verify bytecode compilation
         run: |
           # Fail if any .py file has syntax errors detectable at compile time.
-          python -m compileall -q python/ 2>&1 | tee compileall-${{ matrix.python-version }}.txt
+          python -m compileall -q Python/ 2>&1 | tee compileall-${{ matrix.python-version }}.txt
 
       - name: pytest
         run: |
-          pytest python/ \
+          pytest Python/ \
             -v \
             --tb=short \
             --no-header \
@@ -240,22 +240,22 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          [[ -f python/requirements.txt ]] && pip install -r python/requirements.txt
+          [[ -f python/requirements.txt ]] && pip install -r Python/requirements.txt
           # pyperf produces stable, statistically sound timing measurements.
           pip install pyperf
 
       - name: Run benchmarks
         run: |
           mkdir -p bench-results
-          if [ -d "python/benchmarks" ]; then
-            find python/benchmarks/ -name "*.py" 2>/dev/null | sort | \
+          if [ -d "Python/benchmarks" ]; then
+            find Python/benchmarks/ -name "*.py" 2>/dev/null | sort | \
               while IFS= read -r script; do
                 name="$(basename "${script%.py}")"
                 echo "=== Benchmark: $name ==="
                 python "$script" 2>&1 | tee "bench-results/${name}.txt" || true
               done
           else
-            echo "Directory python/benchmarks/ not found. Skipping benchmarks."
+            echo "Directory Python/benchmarks/ not found. Skipping benchmarks."
           fi
 
       - name: Upload benchmark results

@@ -1,7 +1,7 @@
 # ==============================================================================
 # CoreLab — Orchestration Makefile
 #
-# File naming convention:  c/0001_topic.c   rust/0001_topic.rs   python/0001_topic.py
+# File naming convention:  c/0001_topic.c   rust/0001_topic.rs   Python/0001_topic.py
 #
 # Quick reference
 #   make run-c      id=0001          compile (dev) + run a C experiment
@@ -88,7 +88,7 @@ RUSTC_REL    := --edition=$(RUST_EDITION) \
 BUILD_DIR := .build
 C_DIR     := c
 RUST_DIR  := rust
-PY_DIR    := python
+PY_DIR    := Python
 
 $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)

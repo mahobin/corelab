@@ -78,7 +78,7 @@ jobs:
           config: |
             paths:
               - c/
-              - python/
+              - Python/
             paths-ignore:
               - "**/*test*"
               - "**/*bench*"

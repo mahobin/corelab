@@ -1,0 +1,14 @@
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+extend-ignore = [
+"UP031",  # Old-style string formatting
+"FLY002", # String joining
+"S102",   # exec()
+"UP033",  # lru_cache(maxsize=None)
+"FURB161", # Counting set bits with bin()
+"C400",   # Generator expressions
+"C417",   # map()
+]
