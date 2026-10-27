@@ -139,7 +139,7 @@ jobs:
 
       - name: Upload static analysis report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: c-static-analysis
           path: cppcheck-report.txt
@@ -269,7 +269,7 @@ jobs:
 
       - name: Upload build artifacts
         if: always() && steps.guard.outputs.skip == 'false'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: c-build-${{ matrix.compiler }}-c${{ matrix.std }}-${{ matrix.build_type }}
           path: build/
@@ -336,7 +336,7 @@ jobs:
 
       - name: Upload sanitizer logs
         if: always() && steps.guard.outputs.skip == 'false'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: c-sanitizer-logs
           path: build-san/
@@ -407,7 +407,7 @@ jobs:
 
       - name: Upload Valgrind logs
         if: always() && steps.guard.outputs.skip == 'false'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: c-valgrind-logs
           path: valgrind-logs/
@@ -476,7 +476,7 @@ jobs:
 
       - name: Upload benchmark results
         if: always() && steps.guard.outputs.skip == 'false'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: c-benchmark-results
           path: bench-results/
